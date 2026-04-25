@@ -1,0 +1,14 @@
+.DS_Store
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+build/
+android/
+ios/
+macos/
+linux/
+windows/
+web/
+lib/generated/
+
