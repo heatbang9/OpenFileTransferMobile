@@ -31,5 +31,6 @@ flutter:
   uses-material-design: true
   assets:
     - assets/brand/openfiletransfer-mark.svg
+    - assets/brand/openfiletransfer-icon-generated.png
     - assets/brand/openfiletransfer-icon-1024.png
     - assets/brand/openfiletransfer-icon-512.png
