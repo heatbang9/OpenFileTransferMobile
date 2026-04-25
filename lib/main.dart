@@ -80,13 +80,19 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
           children: [
             _StatusPanel(status: _status),
             const SizedBox(height: 16),
-            _ActionPanel(
+            _DiscoveryPanel(
+              onDiscover: () => _markPending('SSDP 탐색 구현 대기 중'),
+            ),
+            const SizedBox(height: 16),
+            _TransferPanel(
               onDiscover: () => _markPending('SSDP 탐색 구현 대기 중'),
               onPickFile: () => _markPending('파일 선택 구현 대기 중'),
               onSend: () => _markPending('gRPC 전송 구현 대기 중'),
             ),
             const SizedBox(height: 16),
             const _DeviceListPanel(),
+            const SizedBox(height: 16),
+            const _InboxPanel(),
           ],
         ),
       ),
@@ -138,8 +144,27 @@ class _StatusPanel extends StatelessWidget {
   }
 }
 
-class _ActionPanel extends StatelessWidget {
-  const _ActionPanel({
+class _DiscoveryPanel extends StatelessWidget {
+  const _DiscoveryPanel({required this.onDiscover});
+
+  final VoidCallback onDiscover;
+
+  @override
+  Widget build(BuildContext context) {
+    return _BrandedPanel(
+      title: '탐색',
+      trailing: FilledButton.icon(
+        onPressed: onDiscover,
+        icon: const Icon(Icons.radar_rounded),
+        label: const Text('서버 찾기'),
+      ),
+      child: const Text('같은 네트워크의 PC 서버가 여기에 표시됩니다.'),
+    );
+  }
+}
+
+class _TransferPanel extends StatelessWidget {
+  const _TransferPanel({
     required this.onDiscover,
     required this.onPickFile,
     required this.onSend,
@@ -151,27 +176,38 @@ class _ActionPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        FilledButton.icon(
-          onPressed: onDiscover,
-          icon: const Icon(Icons.radar_rounded),
-          label: const Text('서버 찾기'),
-        ),
-        const SizedBox(height: 8),
-        OutlinedButton.icon(
-          onPressed: onPickFile,
-          icon: const Icon(Icons.insert_drive_file_rounded),
-          label: const Text('파일 선택'),
-        ),
-        const SizedBox(height: 8),
-        OutlinedButton.icon(
-          onPressed: onSend,
-          icon: Icon(iconForTransferDirection(true)),
-          label: const Text('파일 보내기'),
-        ),
-      ],
+    return _BrandedPanel(
+      title: '전송',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: onPickFile,
+                  icon: const Icon(Icons.insert_drive_file_rounded),
+                  label: const Text('파일 선택'),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: onSend,
+                  icon: Icon(iconForTransferDirection(true)),
+                  label: const Text('파일 보내기'),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          TextButton.icon(
+            onPressed: onDiscover,
+            icon: Icon(iconForTransferDirection(false)),
+            label: const Text('받을 서버를 먼저 찾기'),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -181,15 +217,80 @@ class _DeviceListPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    return const _BrandedPanel(
+      title: '서버 목록',
+      child: Text('찾은 서버가 여기에 표시됩니다.'),
+    );
+  }
+}
+
+class _InboxPanel extends StatelessWidget {
+  const _InboxPanel();
+
+  @override
+  Widget build(BuildContext context) {
+    return _BrandedPanel(
+      title: '서버 수신함',
+      trailing: OutlinedButton.icon(
+        onPressed: null,
+        icon: const Icon(Icons.inbox_rounded),
+        label: const Text('새로고침'),
+      ),
+      child: const Text('연결한 서버의 수신 파일 목록이 여기에 표시됩니다.'),
+    );
+  }
+}
+
+class _BrandedPanel extends StatelessWidget {
+  const _BrandedPanel({
+    required this.title,
+    required this.child,
+    this.trailing,
+  });
+
+  final String title;
+  final Widget child;
+  final Widget? trailing;
+
+  @override
+  Widget build(BuildContext context) {
     return DecoratedBox(
       decoration: BoxDecoration(
         color: Colors.white,
         border: Border.all(color: OpenFileTransferColors.mint300),
         borderRadius: BorderRadius.circular(8),
+        boxShadow: [
+          BoxShadow(
+            color: OpenFileTransferColors.teal700.withValues(alpha: 0.06),
+            blurRadius: 24,
+            offset: const Offset(0, 10),
+          ),
+        ],
       ),
-      child: const Padding(
-        padding: EdgeInsets.all(16),
-        child: Text('찾은 서버가 여기에 표시됩니다.'),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    title,
+                    style: const TextStyle(
+                      color: OpenFileTransferColors.ink,
+                      fontSize: 17,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+                if (trailing != null) trailing!,
+              ],
+            ),
+            const SizedBox(height: 12),
+            child,
+          ],
+        ),
       ),
     );
   }

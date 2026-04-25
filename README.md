@@ -1,5 +1,7 @@
 # OpenFileTransfer Mobile
 
+![OpenFileTransfer Mobile icon](assets/brand/openfiletransfer-icon-512.png)
+
 OpenFileTransfer 모바일 앱 저장소입니다. Android/iOS 네이티브 앱을 우선 목표로 하며, Flutter로 구현합니다.
 
 ## 왜 Flutter 네이티브인가
@@ -31,6 +33,8 @@ GitHub Actions에서 다음을 확인합니다.
 ## 디자인 콘셉트
 
 앱 아이콘은 연한 민트색 둥근 배경, 태극형 양방향 흐름, 위/아래 화살표를 조합했습니다. 앱 내부 로고는 Flutter `CustomPainter`로 같은 형태를 그려 SVG 렌더링 의존성을 늘리지 않았습니다.
+
+자세한 디자인 가이드는 [docs/brand-design.md](docs/brand-design.md)를 참고하세요.
 
 브랜드 자산:
 
