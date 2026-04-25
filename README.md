@@ -21,9 +21,19 @@ flutter run
 GitHub Actions에서 다음을 확인합니다.
 
 - `flutter pub get`
+- `dart run flutter_launcher_icons`
 - `flutter analyze`
 - `flutter test`
 - Android debug APK build
 
 현재 로컬 환경에는 Flutter SDK가 없어서 CI 기반 검증을 사용합니다.
 
+## 디자인 콘셉트
+
+앱 아이콘은 연한 민트색 둥근 배경, 태극형 양방향 흐름, 위/아래 화살표를 조합했습니다. 앱 내부 로고는 Flutter `CustomPainter`로 같은 형태를 그려 SVG 렌더링 의존성을 늘리지 않았습니다.
+
+브랜드 자산:
+
+- `assets/brand/openfiletransfer-mark.svg`
+- `assets/brand/openfiletransfer-icon-1024.png`
+- `assets/brand/openfiletransfer-icon-512.png`

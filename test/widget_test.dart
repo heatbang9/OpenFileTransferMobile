@@ -8,7 +8,6 @@ void main() {
 
     expect(find.text('OpenFileTransfer'), findsOneWidget);
     expect(find.text('서버 찾기'), findsOneWidget);
-    expect(find.byIcon(Icons.search), findsOneWidget);
+    expect(find.byIcon(Icons.radar_rounded), findsOneWidget);
   });
 }
-

@@ -18,7 +18,18 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.4
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: assets/brand/openfiletransfer-icon-1024.png
+  adaptive_icon_background: "#E9FFF6"
+  adaptive_icon_foreground: assets/brand/openfiletransfer-icon-1024.png
 
 flutter:
   uses-material-design: true
-
+  assets:
+    - assets/brand/openfiletransfer-mark.svg
+    - assets/brand/openfiletransfer-icon-1024.png
+    - assets/brand/openfiletransfer-icon-512.png

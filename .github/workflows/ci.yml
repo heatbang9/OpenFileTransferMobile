@@ -16,8 +16,9 @@ jobs:
           channel: stable
           cache: true
       - run: flutter --version
-      - run: flutter create --platforms android .
+      - run: flutter create --platforms android,ios .
       - run: flutter pub get
+      - run: dart run flutter_launcher_icons
       - run: flutter analyze
       - run: flutter test
       - run: flutter build apk --debug

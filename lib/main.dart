@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import 'src/brand/open_file_transfer_brand.dart';
+
 void main() {
   runApp(const OpenFileTransferApp());
 }
@@ -13,8 +15,28 @@ class OpenFileTransferApp extends StatelessWidget {
       title: 'OpenFileTransfer',
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xff176b87),
+          seedColor: OpenFileTransferColors.mint600,
           brightness: Brightness.light,
+        ),
+        scaffoldBackgroundColor: OpenFileTransferColors.surface,
+        appBarTheme: const AppBarTheme(
+          backgroundColor: OpenFileTransferColors.surface,
+          foregroundColor: OpenFileTransferColors.ink,
+          centerTitle: false,
+        ),
+        filledButtonTheme: FilledButtonThemeData(
+          style: FilledButton.styleFrom(
+            backgroundColor: OpenFileTransferColors.teal700,
+            foregroundColor: Colors.white,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+          ),
+        ),
+        outlinedButtonTheme: OutlinedButtonThemeData(
+          style: OutlinedButton.styleFrom(
+            foregroundColor: OpenFileTransferColors.teal900,
+            side: const BorderSide(color: OpenFileTransferColors.mint300),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+          ),
         ),
         useMaterial3: true,
       ),
@@ -43,7 +65,14 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('OpenFileTransfer'),
+        title: const Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            OpenFileTransferMark(size: 32),
+            SizedBox(width: 10),
+            Text('OpenFileTransfer'),
+          ],
+        ),
       ),
       body: SafeArea(
         child: ListView(
@@ -76,7 +105,7 @@ class _StatusPanel extends StatelessWidget {
     return DecoratedBox(
       decoration: BoxDecoration(
         color: colorScheme.surface,
-        border: Border.all(color: colorScheme.outlineVariant),
+        border: Border.all(color: OpenFileTransferColors.mint300),
         borderRadius: BorderRadius.circular(8),
       ),
       child: Padding(
@@ -84,9 +113,21 @@ class _StatusPanel extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
-              '모바일 클라이언트',
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
+            const Row(
+              children: [
+                OpenFileTransferMark(size: 56),
+                SizedBox(width: 14),
+                Expanded(
+                  child: Text(
+                    '모바일 클라이언트',
+                    style: TextStyle(
+                      color: OpenFileTransferColors.ink,
+                      fontSize: 20,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+              ],
             ),
             const SizedBox(height: 8),
             Text(status),
@@ -115,19 +156,19 @@ class _ActionPanel extends StatelessWidget {
       children: [
         FilledButton.icon(
           onPressed: onDiscover,
-          icon: const Icon(Icons.search),
+          icon: const Icon(Icons.radar_rounded),
           label: const Text('서버 찾기'),
         ),
         const SizedBox(height: 8),
         OutlinedButton.icon(
           onPressed: onPickFile,
-          icon: const Icon(Icons.attach_file),
+          icon: const Icon(Icons.insert_drive_file_rounded),
           label: const Text('파일 선택'),
         ),
         const SizedBox(height: 8),
         OutlinedButton.icon(
           onPressed: onSend,
-          icon: const Icon(Icons.upload_file),
+          icon: Icon(iconForTransferDirection(true)),
           label: const Text('파일 보내기'),
         ),
       ],
@@ -140,10 +181,10 @@ class _DeviceListPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
     return DecoratedBox(
       decoration: BoxDecoration(
-        border: Border.all(color: colorScheme.outlineVariant),
+        color: Colors.white,
+        border: Border.all(color: OpenFileTransferColors.mint300),
         borderRadius: BorderRadius.circular(8),
       ),
       child: const Padding(
@@ -153,4 +194,3 @@ class _DeviceListPanel extends StatelessWidget {
     );
   }
 }
-
