@@ -22,6 +22,5 @@
 - PC 앱과 동일하게 패널과 버튼 radius는 8px을 기본으로 둡니다.
 - 주요 액션인 서버 찾기는 `Teal 700` filled button을 사용합니다.
 - 파일 선택, 파일 보내기, 수신함 조회는 민트 테두리의 outlined button을 사용합니다.
-- 앱 아이콘과 인앱 로고는 같은 태극형 양방향 전송 마크를 사용합니다.
+- 앱 아이콘과 인앱 로고는 상단 우측에서 좌측, 하단 좌측에서 우측으로 흐르는 같은 태극형 양방향 전송 마크를 사용합니다.
 - Android/iOS launcher icon은 `flutter_launcher_icons`로 같은 PNG 원본에서 생성합니다.
-
