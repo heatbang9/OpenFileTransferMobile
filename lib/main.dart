@@ -92,6 +92,8 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
             const SizedBox(height: 16),
             const _DeviceListPanel(),
             const SizedBox(height: 16),
+            const _EventPanel(),
+            const SizedBox(height: 16),
             const _InboxPanel(),
           ],
         ),
@@ -237,6 +239,25 @@ class _InboxPanel extends StatelessWidget {
         label: const Text('새로고침'),
       ),
       child: const Text('연결한 서버의 수신 파일 목록이 여기에 표시됩니다.'),
+    );
+  }
+}
+
+class _EventPanel extends StatelessWidget {
+  const _EventPanel();
+
+  @override
+  Widget build(BuildContext context) {
+    return _BrandedPanel(
+      title: '서버 이벤트',
+      trailing: OutlinedButton.icon(
+        onPressed: null,
+        icon: const Icon(Icons.notifications_active_rounded),
+        label: const Text('구독'),
+      ),
+      child: const Text(
+        'PC 서버 연결 후 SubscribeEvents 스트림을 유지하면 파일 수신, 서버 메시지, 연결 상태 이벤트가 여기에 표시됩니다.',
+      ),
     );
   }
 }
