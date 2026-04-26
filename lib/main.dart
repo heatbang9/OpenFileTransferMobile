@@ -1,8 +1,16 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 
 import 'src/brand/open_file_transfer_brand.dart';
+import 'src/transfer/background_transfer_service.dart';
+
+final BackgroundTransferService _backgroundTransferService = BackgroundTransferService();
 
 void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  BackgroundTransferService.initCommunicationPort();
   runApp(const OpenFileTransferApp());
 }
 
@@ -40,7 +48,7 @@ class OpenFileTransferApp extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
-      home: const DeviceDiscoveryPage(),
+      home: const WithForegroundTask(child: DeviceDiscoveryPage()),
     );
   }
 }
@@ -58,6 +66,43 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
   void _markPending(String text) {
     setState(() {
       _status = text;
+    });
+  }
+
+  void _startBackgroundTransfer(TransferDirection direction) {
+    final fileName = direction == TransferDirection.sending
+        ? 'mobile-upload.bin'
+        : 'pc-download.bin';
+    _markPending('${direction.label} 백그라운드 서비스 시작 중');
+    _backgroundTransferService.startTransfer(direction: direction, fileName: fileName).then((_) {
+      if (!mounted) {
+        return;
+      }
+      _markPending('${direction.label} 진행 상태가 알림 영역에 표시됩니다.');
+    }).catchError((Object error) {
+      if (!mounted) {
+        return;
+      }
+      _markPending('백그라운드 서비스 시작 실패: $error');
+    });
+  }
+
+  void _advanceBackgroundTransfer() {
+    final nextProgress = _backgroundTransferService.snapshot.progress + 0.25;
+    _backgroundTransferService.updateProgress(nextProgress).catchError((Object error) {
+      if (!mounted) {
+        return;
+      }
+      _markPending('진행률 갱신 실패: $error');
+    });
+  }
+
+  void _completeBackgroundTransfer() {
+    _backgroundTransferService.completeTransfer().catchError((Object error) {
+      if (!mounted) {
+        return;
+      }
+      _markPending('전송 완료 처리 실패: $error');
     });
   }
 
@@ -87,7 +132,18 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
             _TransferPanel(
               onDiscover: () => _markPending('SSDP 탐색 구현 대기 중'),
               onPickFile: () => _markPending('파일 선택 구현 대기 중'),
-              onSend: () => _markPending('gRPC 전송 구현 대기 중'),
+              onSend: () => _startBackgroundTransfer(TransferDirection.sending),
+            ),
+            const SizedBox(height: 16),
+            _BackgroundTransferPanel(
+              service: _backgroundTransferService,
+              onStartSend: () => _startBackgroundTransfer(TransferDirection.sending),
+              onStartReceive: () => _startBackgroundTransfer(TransferDirection.receiving),
+              onAdvance: _advanceBackgroundTransfer,
+              onComplete: _completeBackgroundTransfer,
+              onStop: () {
+                unawaited(_backgroundTransferService.stop());
+              },
             ),
             const SizedBox(height: 16),
             const _DeviceListPanel(),
@@ -210,6 +266,99 @@ class _TransferPanel extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _BackgroundTransferPanel extends StatelessWidget {
+  const _BackgroundTransferPanel({
+    required this.service,
+    required this.onStartSend,
+    required this.onStartReceive,
+    required this.onAdvance,
+    required this.onComplete,
+    required this.onStop,
+  });
+
+  final BackgroundTransferService service;
+  final VoidCallback onStartSend;
+  final VoidCallback onStartReceive;
+  final VoidCallback onAdvance;
+  final VoidCallback onComplete;
+  final VoidCallback onStop;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: service,
+      builder: (context, _) {
+        final snapshot = service.snapshot;
+        return _BrandedPanel(
+          title: '백그라운드 전송',
+          trailing: SizedBox(
+            width: 36,
+            height: 36,
+            child: CircularProgressIndicator(
+              value: snapshot.active ? snapshot.progress : null,
+              strokeWidth: 4,
+              color: OpenFileTransferColors.teal700,
+              backgroundColor: OpenFileTransferColors.mint100,
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                snapshot.message,
+                style: const TextStyle(
+                  color: OpenFileTransferColors.ink,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 10),
+              LinearProgressIndicator(
+                value: snapshot.active ? snapshot.progress : 0,
+                minHeight: 8,
+                color: OpenFileTransferColors.teal700,
+                backgroundColor: OpenFileTransferColors.mint100,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: onStartSend,
+                    icon: Icon(iconForTransferDirection(true)),
+                    label: const Text('전송 시작'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: onStartReceive,
+                    icon: Icon(iconForTransferDirection(false)),
+                    label: const Text('수신 시작'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: snapshot.active ? onAdvance : null,
+                    icon: const Icon(Icons.trending_up_rounded),
+                    label: Text('${snapshot.percent}%'),
+                  ),
+                  FilledButton.icon(
+                    onPressed: snapshot.active ? onComplete : null,
+                    icon: const Icon(Icons.check_rounded),
+                    label: const Text('완료'),
+                  ),
+                  TextButton.icon(
+                    onPressed: snapshot.active ? onStop : null,
+                    icon: const Icon(Icons.close_rounded),
+                    label: const Text('중지'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 }

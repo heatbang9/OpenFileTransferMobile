@@ -17,6 +17,7 @@ jobs:
           cache: true
       - run: flutter --version
       - run: flutter create --platforms android,ios .
+      - run: ./scripts/configure-android-foreground-service.sh
       - run: flutter pub get
       - run: dart run flutter_launcher_icons
       - run: flutter analyze

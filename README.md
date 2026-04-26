@@ -30,6 +30,25 @@ GitHub Actions에서 다음을 확인합니다.
 
 현재 로컬 환경에는 Flutter SDK가 없어서 CI 기반 검증을 사용합니다.
 
+## 백그라운드 전송
+
+Android는 전송/수신 중 앱을 나가도 작업을 계속 유지하기 위해 foreground service를 사용합니다. 구현 기준은 `flutter_foreground_task`이며, Android 14 이상 요구사항에 맞춰 `dataSync` foreground service type을 선언합니다.
+
+- `lib/src/transfer/background_transfer_service.dart`가 전송 시작, 수신 시작, 진행률 갱신, 완료/중지를 담당합니다.
+- UI의 `백그라운드 전송` 패널은 같은 민트 디자인으로 진행률 원형/선형 표시를 제공합니다.
+- Android 알림 영역에는 `OpenFileTransfer 전송 중`, `OpenFileTransfer 수신 중`, 진행 퍼센트가 표시됩니다.
+- foreground service가 실행 중일 때 Android 뒤로가기는 앱 종료가 아니라 최소화로 동작하도록 `WithForegroundTask`를 적용했습니다.
+- `scripts/configure-android-foreground-service.sh`는 `flutter create` 후 AndroidManifest에 `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_DATA_SYNC`, `POST_NOTIFICATIONS`, foreground service 선언을 추가합니다.
+- 실제 gRPC `SendFile`/수신 저장 엔진이 연결되면 전송 루프에서 `startTransfer`, `updateProgress`, `completeTransfer`를 호출하는 구조입니다.
+
+iOS는 Android처럼 임의 장시간 네트워크 작업을 계속 돌리는 모델이 아닙니다. `flutter_foreground_task`도 iOS에서는 강제 종료 시 즉시 중단되고, 백그라운드 실행 시간이 제한됩니다. iOS에서 긴 파일 전송을 안정화하려면 다음 단계에서 `URLSession` background transfer를 쓰는 HTTP/HTTPS 전송 경로를 별도 검토하는 편이 현실적입니다.
+
+참고 문서:
+
+- [flutter_foreground_task](https://pub.dev/packages/flutter_foreground_task)
+- [Android foreground service type: dataSync](https://developer.android.com/about/versions/14/changes/fgs-types-required#data-sync)
+- [Apple BackgroundTasks](https://developer.apple.com/documentation/BackgroundTasks)
+
 ## 현재 통신 상태
 
 - 모바일 저장소는 아직 실제 gRPC 연결 코드를 생성해 붙인 상태가 아닙니다.
