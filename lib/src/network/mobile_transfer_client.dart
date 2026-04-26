@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'package:convert/convert.dart';
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:cryptography/cryptography.dart';
 import 'package:grpc/grpc.dart';
@@ -11,7 +12,8 @@ import 'package:uuid/uuid.dart';
 
 import '../protocol/transfer_messages.dart';
 
-const _defaultChunkSize = 64 * 1024;
+export '../protocol/transfer_messages.dart' show TransferReceipt;
+
 final _hkdfSalt = Uint8List.fromList('openfiletransfer-v1-session'.codeUnits);
 final _hkdfInfo = Uint8List.fromList('openfiletransfer-file-payload'.codeUnits);
 final _x25519SpkiPrefix = Uint8List.fromList(<int>[
@@ -178,7 +180,7 @@ class MobileTransferClient {
     final totalSize = stat.size;
     final fileName = p.basename(filePath);
     final transferId = const Uuid().v4();
-    final digestSink = crypto.AccumulatorSink<crypto.Digest>();
+    final digestSink = AccumulatorSink<crypto.Digest>();
     final hashInput = crypto.sha256.startChunkedConversion(digestSink);
     var offset = 0;
 
