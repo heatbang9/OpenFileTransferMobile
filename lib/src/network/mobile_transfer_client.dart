@@ -12,7 +12,7 @@ import 'package:uuid/uuid.dart';
 
 import '../protocol/transfer_messages.dart';
 
-export '../protocol/transfer_messages.dart' show TransferReceipt;
+export '../protocol/transfer_messages.dart' show ServerEvent, TransferReceipt;
 
 final _hkdfSalt = Uint8List.fromList('openfiletransfer-v1-session'.codeUnits);
 final _hkdfInfo = Uint8List.fromList('openfiletransfer-file-payload'.codeUnits);
@@ -94,12 +94,23 @@ class OpenFileTransferGrpcClient extends Client {
     TransferReceipt.fromBuffer,
   );
 
+  static final ClientMethod<EventSubscription, ServerEvent> _subscribeEvents =
+      ClientMethod<EventSubscription, ServerEvent>(
+    '/openfiletransfer.v1.TransferService/SubscribeEvents',
+    (request) => request.writeToBuffer(),
+    ServerEvent.fromBuffer,
+  );
+
   ResponseFuture<HandshakeResponse> handshake(HandshakeRequest request) {
     return $createUnaryCall(_handshake, request);
   }
 
   ResponseFuture<TransferReceipt> sendFile(Stream<FileChunk> request) {
     return $createStreamingCall(_sendFile, request).single;
+  }
+
+  ResponseStream<ServerEvent> subscribeEvents(EventSubscription request) {
+    return $createStreamingCall(_subscribeEvents, Stream<EventSubscription>.value(request));
   }
 }
 
@@ -219,6 +230,30 @@ class MobileTransferClient {
     return receipt;
   }
 
+  Future<MobileEventSubscription> subscribeEvents({
+    void Function(ServerEvent event)? onEvent,
+    void Function(Object error)? onError,
+  }) async {
+    final session = await handshake();
+    final stream = _grpcClient.subscribeEvents(
+      EventSubscription(
+        sessionId: session.sessionId,
+        clientDeviceId: clientDeviceId,
+        clientName: clientName,
+        eventTypes: const <String>[],
+      ),
+    );
+    final subscription = stream.listen(
+      onEvent,
+      onError: onError,
+      cancelOnError: false,
+    );
+    return MobileEventSubscription(
+      session: session,
+      subscription: subscription,
+    );
+  }
+
   Future<void> close() => _channel.shutdown();
 
   Future<SecretBox> _encryptChunk(SecretKey sessionKey, List<int> plain) {
@@ -255,4 +290,16 @@ class MobileTransferClient {
     }
     return spkiPublicKey.sublist(_x25519SpkiPrefix.length);
   }
+}
+
+class MobileEventSubscription {
+  const MobileEventSubscription({
+    required this.session,
+    required this.subscription,
+  });
+
+  final OpenFileTransferSession session;
+  final StreamSubscription<ServerEvent> subscription;
+
+  Future<void> cancel() => subscription.cancel();
 }

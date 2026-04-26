@@ -133,6 +133,168 @@ class FileChunk {
   }
 }
 
+class EventSubscription {
+  const EventSubscription({
+    required this.sessionId,
+    required this.clientDeviceId,
+    required this.clientName,
+    required this.eventTypes,
+  });
+
+  final String sessionId;
+  final String clientDeviceId;
+  final String clientName;
+  final List<String> eventTypes;
+
+  List<int> writeToBuffer() {
+    final writer = ProtoWriter()
+      ..writeString(1, sessionId)
+      ..writeString(2, clientDeviceId)
+      ..writeString(3, clientName);
+    for (final eventType in eventTypes) {
+      writer.writeString(4, eventType);
+    }
+    return writer.takeBytes();
+  }
+}
+
+class ServerEvent {
+  const ServerEvent({
+    required this.eventId,
+    required this.type,
+    required this.unixTimeMs,
+    required this.message,
+    required this.sessionId,
+    required this.peerDeviceId,
+    required this.peerName,
+    required this.file,
+  });
+
+  final String eventId;
+  final String type;
+  final int unixTimeMs;
+  final String message;
+  final String sessionId;
+  final String peerDeviceId;
+  final String peerName;
+  final FileEntry? file;
+
+  static ServerEvent fromBuffer(List<int> bytes) {
+    final reader = ProtoReader(bytes);
+    var eventId = '';
+    var type = '';
+    var unixTimeMs = 0;
+    var message = '';
+    var sessionId = '';
+    var peerDeviceId = '';
+    var peerName = '';
+    FileEntry? file;
+
+    while (!reader.isAtEnd) {
+      final tag = reader.readTag();
+      final field = tag >> 3;
+      final wireType = tag & 7;
+      switch (field) {
+        case 1:
+          eventId = reader.readString();
+          break;
+        case 2:
+          type = reader.readString();
+          break;
+        case 3:
+          unixTimeMs = reader.readVarint();
+          break;
+        case 4:
+          message = reader.readString();
+          break;
+        case 5:
+          sessionId = reader.readString();
+          break;
+        case 6:
+          peerDeviceId = reader.readString();
+          break;
+        case 7:
+          peerName = reader.readString();
+          break;
+        case 8:
+          file = FileEntry.fromBuffer(reader.readLengthDelimited());
+          break;
+        default:
+          reader.skipField(wireType);
+      }
+    }
+
+    return ServerEvent(
+      eventId: eventId,
+      type: type,
+      unixTimeMs: unixTimeMs,
+      message: message,
+      sessionId: sessionId,
+      peerDeviceId: peerDeviceId,
+      peerName: peerName,
+      file: file,
+    );
+  }
+}
+
+class FileEntry {
+  const FileEntry({
+    required this.fileId,
+    required this.fileName,
+    required this.size,
+    required this.sha256Hex,
+    required this.receivedAtUnixTimeMs,
+  });
+
+  final String fileId;
+  final String fileName;
+  final int size;
+  final String sha256Hex;
+  final int receivedAtUnixTimeMs;
+
+  static FileEntry fromBuffer(List<int> bytes) {
+    final reader = ProtoReader(bytes);
+    var fileId = '';
+    var fileName = '';
+    var size = 0;
+    var sha256Hex = '';
+    var receivedAtUnixTimeMs = 0;
+
+    while (!reader.isAtEnd) {
+      final tag = reader.readTag();
+      final field = tag >> 3;
+      final wireType = tag & 7;
+      switch (field) {
+        case 1:
+          fileId = reader.readString();
+          break;
+        case 2:
+          fileName = reader.readString();
+          break;
+        case 3:
+          size = reader.readVarint();
+          break;
+        case 4:
+          sha256Hex = reader.readString();
+          break;
+        case 5:
+          receivedAtUnixTimeMs = reader.readVarint();
+          break;
+        default:
+          reader.skipField(wireType);
+      }
+    }
+
+    return FileEntry(
+      fileId: fileId,
+      fileName: fileName,
+      size: size,
+      sha256Hex: sha256Hex,
+      receivedAtUnixTimeMs: receivedAtUnixTimeMs,
+    );
+  }
+}
+
 class TransferReceipt {
   const TransferReceipt({
     required this.transferId,

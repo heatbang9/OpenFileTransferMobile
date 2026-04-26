@@ -72,10 +72,14 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
   DeviceProfile? _deviceProfile;
   List<DiscoveredServer> _servers = const <DiscoveredServer>[];
   DiscoveredServer? _selectedServer;
+  MobileTransferClient? _eventClient;
+  MobileEventSubscription? _eventSubscription;
+  final List<ServerEvent> _events = <ServerEvent>[];
   String? _selectedFilePath;
   String? _selectedFileName;
   TransferReceipt? _lastReceipt;
   bool _discovering = false;
+  bool _subscribing = false;
   bool _sending = false;
 
   void _markPending(String text) {
@@ -153,6 +157,91 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
       _addressController.text = server.address;
       _lastReceipt = null;
       _status = '${server.deviceName}에 연결할 준비가 되었습니다.';
+    });
+  }
+
+  Future<void> _subscribeSelectedServer() async {
+    final address = _addressController.text.trim();
+    if (address.isEmpty) {
+      _markPending('구독할 PC 서버 주소를 입력하세요.');
+      return;
+    }
+    setState(() {
+      _subscribing = true;
+      _status = '서버 이벤트 구독 중';
+    });
+    await _unsubscribeEvents(updateStatus: false);
+    final profile = _deviceProfile ?? await _deviceProfileStore.load();
+    final client = MobileTransferClient(
+      address: address,
+      clientDeviceId: profile.deviceId,
+      clientName: profile.deviceName,
+    );
+    try {
+      final subscription = await client.subscribeEvents(
+        onEvent: (event) {
+          if (!mounted) {
+            return;
+          }
+          setState(() {
+            _events.add(event);
+            if (_events.length > 30) {
+              _events.removeRange(0, _events.length - 30);
+            }
+            _status = '서버 이벤트 수신: ${event.message}';
+          });
+        },
+        onError: (error) {
+          if (!mounted) {
+            return;
+          }
+          setState(() {
+            _status = '서버 이벤트 구독 오류: $error';
+          });
+        },
+      );
+      if (!mounted) {
+        await subscription.cancel();
+        await client.close();
+        return;
+      }
+      setState(() {
+        _eventClient = client;
+        _eventSubscription = subscription;
+        _status = '서버 이벤트 구독 중';
+      });
+    } catch (error) {
+      await client.close();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _status = '서버 이벤트 구독 실패: $error';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _subscribing = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _unsubscribeEvents({bool updateStatus = true}) async {
+    await _eventSubscription?.cancel();
+    await _eventClient?.close();
+    _eventSubscription = null;
+    _eventClient = null;
+    if (mounted && updateStatus) {
+      setState(() {
+        _status = '서버 이벤트 구독을 해제했습니다.';
+      });
+    }
+  }
+
+  void _clearEvents() {
+    setState(() {
+      _events.clear();
     });
   }
 
@@ -282,6 +371,7 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
 
   @override
   void dispose() {
+    unawaited(_unsubscribeEvents(updateStatus: false));
     _addressController.dispose();
     _deviceNameController.dispose();
     super.dispose();
@@ -342,7 +432,16 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
               },
             ),
             const SizedBox(height: 16),
-            const _EventPanel(),
+            _EventPanel(
+              subscribing: _subscribing,
+              subscribed: _eventSubscription != null,
+              events: _events,
+              onSubscribe: _subscribeSelectedServer,
+              onUnsubscribe: () {
+                unawaited(_unsubscribeEvents());
+              },
+              onClear: _clearEvents,
+            ),
             const SizedBox(height: 16),
             const _InboxPanel(),
           ],
@@ -790,20 +889,57 @@ class _InboxPanel extends StatelessWidget {
 }
 
 class _EventPanel extends StatelessWidget {
-  const _EventPanel();
+  const _EventPanel({
+    required this.subscribing,
+    required this.subscribed,
+    required this.events,
+    required this.onSubscribe,
+    required this.onUnsubscribe,
+    required this.onClear,
+  });
+
+  final bool subscribing;
+  final bool subscribed;
+  final List<ServerEvent> events;
+  final VoidCallback onSubscribe;
+  final VoidCallback onUnsubscribe;
+  final VoidCallback onClear;
 
   @override
   Widget build(BuildContext context) {
     return _BrandedPanel(
       title: '서버 이벤트',
-      trailing: OutlinedButton.icon(
-        onPressed: null,
-        icon: const Icon(Icons.notifications_active_rounded),
-        label: const Text('구독'),
+      trailing: Wrap(
+        spacing: 8,
+        children: [
+          OutlinedButton.icon(
+            onPressed: subscribing ? null : (subscribed ? onUnsubscribe : onSubscribe),
+            icon: Icon(subscribed ? Icons.notifications_off_rounded : Icons.notifications_active_rounded),
+            label: Text(subscribing ? '구독 중' : (subscribed ? '해제' : '구독')),
+          ),
+          OutlinedButton.icon(
+            onPressed: events.isEmpty ? null : onClear,
+            icon: const Icon(Icons.clear_rounded),
+            label: const Text('지우기'),
+          ),
+        ],
       ),
-      child: const Text(
-        'PC 서버 연결 후 SubscribeEvents 스트림을 유지하면 파일 수신, 서버 메시지, 연결 상태 이벤트가 여기에 표시됩니다.',
-      ),
+      child: events.isEmpty
+          ? const Text(
+              'PC 서버를 선택하고 구독하면 파일 수신, 서버 메시지, 연결 상태 이벤트가 여기에 표시됩니다.',
+            )
+          : Column(
+              children: events.reversed.take(10).map((event) {
+                final fileText = event.file?.fileName == null ? '' : ' · ${event.file!.fileName}';
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: _TransferDetailRow(
+                    label: event.type.isEmpty ? 'event' : event.type,
+                    value: '${event.message}$fileText',
+                  ),
+                );
+              }).toList(growable: false),
+            ),
     );
   }
 }
