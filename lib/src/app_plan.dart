@@ -2,7 +2,8 @@ class MobileImplementationPlan {
   const MobileImplementationPlan();
 
   List<String> get steps => const [
-        'SSDP 탐색용 플랫폼 채널 또는 검증된 플러그인 선정',
+        'SSDP 탐색으로 OpenFileTransfer 서버 목록 표시 완료',
+        '내부 저장소에 모바일 UUID와 디바이스 이름 유지 완료',
         'Dart gRPC 생성 코드 연결 또는 수동 protobuf codec 제거',
         'Handshake와 세션 키 파생 구현 완료',
         'SendFile client-streaming 전송 구현 완료',

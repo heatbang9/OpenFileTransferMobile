@@ -5,10 +5,13 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 
 import 'src/brand/open_file_transfer_brand.dart';
+import 'src/device/device_profile_store.dart';
+import 'src/discovery/ssdp_discovery_client.dart';
 import 'src/network/mobile_transfer_client.dart';
 import 'src/transfer/background_transfer_service.dart';
 
 final BackgroundTransferService _backgroundTransferService = BackgroundTransferService();
+final DeviceProfileStore _deviceProfileStore = DeviceProfileStore();
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -64,15 +67,92 @@ class DeviceDiscoveryPage extends StatefulWidget {
 
 class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
   final TextEditingController _addressController = TextEditingController(text: '10.0.2.2:39091');
+  final TextEditingController _deviceNameController = TextEditingController();
   String _status = '서버를 찾을 준비가 되었습니다.';
+  DeviceProfile? _deviceProfile;
+  List<DiscoveredServer> _servers = const <DiscoveredServer>[];
+  DiscoveredServer? _selectedServer;
   String? _selectedFilePath;
   String? _selectedFileName;
   TransferReceipt? _lastReceipt;
+  bool _discovering = false;
   bool _sending = false;
 
   void _markPending(String text) {
     setState(() {
       _status = text;
+    });
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _loadDeviceProfile();
+  }
+
+  Future<void> _loadDeviceProfile() async {
+    final profile = await _deviceProfileStore.load();
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _deviceProfile = profile;
+      _deviceNameController.text = profile.deviceName;
+    });
+  }
+
+  Future<void> _saveDeviceName() async {
+    final nextName = _deviceNameController.text.trim();
+    if (nextName.isEmpty) {
+      _markPending('디바이스 이름을 입력하세요.');
+      return;
+    }
+    final profile = await _deviceProfileStore.saveName(nextName);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _deviceProfile = profile;
+      _status = '${profile.deviceName} 이름으로 저장되었습니다.';
+    });
+  }
+
+  Future<void> _discoverServers() async {
+    setState(() {
+      _discovering = true;
+      _status = 'OpenFileTransfer 서버 탐색 중';
+    });
+    try {
+      final servers = await SsdpDiscoveryClient().discover();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _servers = servers;
+        _status = servers.isEmpty ? '찾은 서버가 없습니다.' : '서버 ${servers.length}개를 찾았습니다.';
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _status = 'SSDP 탐색 실패: $error';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _discovering = false;
+        });
+      }
+    }
+  }
+
+  void _selectServer(DiscoveredServer server) {
+    setState(() {
+      _selectedServer = server;
+      _addressController.text = server.address;
+      _lastReceipt = null;
+      _status = '${server.deviceName}에 연결할 준비가 되었습니다.';
     });
   }
 
@@ -152,7 +232,12 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
         direction: TransferDirection.sending,
         fileName: fileName,
       );
-      client = MobileTransferClient(address: address);
+      final profile = _deviceProfile ?? await _deviceProfileStore.load();
+      client = MobileTransferClient(
+        address: address,
+        clientDeviceId: profile.deviceId,
+        clientName: profile.deviceName,
+      );
       final receipt = await client.sendFile(
         filePath,
         onProgress: (progress) {
@@ -198,6 +283,7 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
   @override
   void dispose() {
     _addressController.dispose();
+    _deviceNameController.dispose();
     super.dispose();
   }
 
@@ -220,16 +306,27 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
           children: [
             _StatusPanel(status: _status),
             const SizedBox(height: 16),
+            _DeviceProfilePanel(
+              profile: _deviceProfile,
+              controller: _deviceNameController,
+              onSave: _saveDeviceName,
+            ),
+            const SizedBox(height: 16),
             _DiscoveryPanel(
-              onDiscover: () => _markPending('SSDP 탐색 구현 대기 중'),
+              discovering: _discovering,
+              servers: _servers,
+              selectedServer: _selectedServer,
+              onDiscover: _discoverServers,
+              onSelectServer: _selectServer,
             ),
             const SizedBox(height: 16),
             _TransferPanel(
               addressController: _addressController,
               selectedFileName: _selectedFileName,
               lastReceipt: _lastReceipt,
+              selectedServer: _selectedServer,
               sending: _sending,
-              onDiscover: () => _markPending('SSDP 자동 탐색은 다음 단계입니다. 지금은 PC 서버 주소를 직접 입력하세요.'),
+              onDiscover: _discoverServers,
               onPickFile: _pickFile,
               onSend: _sendSelectedFile,
             ),
@@ -244,8 +341,6 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
                 unawaited(_backgroundTransferService.stop());
               },
             ),
-            const SizedBox(height: 16),
-            const _DeviceListPanel(),
             const SizedBox(height: 16),
             const _EventPanel(),
             const SizedBox(height: 16),
@@ -301,21 +396,153 @@ class _StatusPanel extends StatelessWidget {
   }
 }
 
-class _DiscoveryPanel extends StatelessWidget {
-  const _DiscoveryPanel({required this.onDiscover});
+class _DeviceProfilePanel extends StatelessWidget {
+  const _DeviceProfilePanel({
+    required this.profile,
+    required this.controller,
+    required this.onSave,
+  });
 
+  final DeviceProfile? profile;
+  final TextEditingController controller;
+  final VoidCallback onSave;
+
+  @override
+  Widget build(BuildContext context) {
+    return _BrandedPanel(
+      title: '내 디바이스',
+      trailing: OutlinedButton.icon(
+        onPressed: onSave,
+        icon: const Icon(Icons.save_rounded),
+        label: const Text('저장'),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          TextField(
+            controller: controller,
+            decoration: const InputDecoration(
+              labelText: '디바이스 이름',
+              hintText: '예: 민수 Android',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 10),
+          Text(
+            'UUID ${profile?.deviceId ?? '생성 중'}',
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(color: OpenFileTransferColors.teal900),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DiscoveryPanel extends StatelessWidget {
+  const _DiscoveryPanel({
+    required this.discovering,
+    required this.servers,
+    required this.selectedServer,
+    required this.onDiscover,
+    required this.onSelectServer,
+  });
+
+  final bool discovering;
+  final List<DiscoveredServer> servers;
+  final DiscoveredServer? selectedServer;
   final VoidCallback onDiscover;
+  final ValueChanged<DiscoveredServer> onSelectServer;
 
   @override
   Widget build(BuildContext context) {
     return _BrandedPanel(
       title: '탐색',
       trailing: FilledButton.icon(
-        onPressed: onDiscover,
+        onPressed: discovering ? null : onDiscover,
         icon: const Icon(Icons.radar_rounded),
-        label: const Text('서버 찾기'),
+        label: Text(discovering ? '찾는 중' : '서버 찾기'),
       ),
-      child: const Text('같은 네트워크의 PC 서버가 여기에 표시됩니다.'),
+      child: servers.isEmpty
+          ? const Text('같은 네트워크의 OpenFileTransfer PC 서버가 여기에 표시됩니다.')
+          : Column(
+              children: servers.map((server) {
+                final selected = selectedServer?.deviceId == server.deviceId;
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: _ServerTile(
+                    server: server,
+                    selected: selected,
+                    onTap: () => onSelectServer(server),
+                  ),
+                );
+              }).toList(growable: false),
+            ),
+    );
+  }
+}
+
+class _ServerTile extends StatelessWidget {
+  const _ServerTile({
+    required this.server,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final DiscoveredServer server;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(8),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: selected ? OpenFileTransferColors.mint50 : Colors.white,
+          border: Border.all(
+            color: selected ? OpenFileTransferColors.teal700 : OpenFileTransferColors.mint300,
+          ),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Row(
+            children: [
+              Icon(
+                selected ? Icons.check_circle_rounded : Icons.computer_rounded,
+                color: OpenFileTransferColors.teal700,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      server.deviceName,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: OpenFileTransferColors.ink,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      '${server.address} · ${server.deviceId}',
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: OpenFileTransferColors.teal900,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
@@ -325,6 +552,7 @@ class _TransferPanel extends StatelessWidget {
     required this.addressController,
     required this.selectedFileName,
     required this.lastReceipt,
+    required this.selectedServer,
     required this.sending,
     required this.onDiscover,
     required this.onPickFile,
@@ -334,6 +562,7 @@ class _TransferPanel extends StatelessWidget {
   final TextEditingController addressController;
   final String? selectedFileName;
   final TransferReceipt? lastReceipt;
+  final DiscoveredServer? selectedServer;
   final bool sending;
   final VoidCallback onDiscover;
   final VoidCallback onPickFile;
@@ -356,6 +585,13 @@ class _TransferPanel extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 12),
+          _TransferDetailRow(
+            label: '선택 서버',
+            value: selectedServer == null
+                ? '직접 입력 또는 서버 찾기'
+                : '${selectedServer!.deviceName} (${selectedServer!.address})',
+          ),
+          const SizedBox(height: 8),
           _TransferDetailRow(
             label: '선택 파일',
             value: selectedFileName ?? '없음',
@@ -532,18 +768,6 @@ class _BackgroundTransferPanel extends StatelessWidget {
           ),
         );
       },
-    );
-  }
-}
-
-class _DeviceListPanel extends StatelessWidget {
-  const _DeviceListPanel();
-
-  @override
-  Widget build(BuildContext context) {
-    return const _BrandedPanel(
-      title: '서버 목록',
-      child: Text('찾은 서버가 여기에 표시됩니다.'),
     );
   }
 }

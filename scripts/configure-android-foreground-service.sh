@@ -15,6 +15,10 @@ path = Path("android/app/src/main/AndroidManifest.xml")
 text = path.read_text()
 
 permissions = [
+    '<uses-permission android:name="android.permission.INTERNET" />',
+    '<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />',
+    '<uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />',
+    '<uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />',
     '<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />',
     '<uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />',
     '<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />',
@@ -39,6 +43,9 @@ service = (
 
 if service_name not in text:
     text = text.replace("    </application>", f"{service}\n    </application>")
+
+if 'android:usesCleartextTraffic=' not in text:
+    text = text.replace("<application", '<application android:usesCleartextTraffic="true"', 1)
 
 path.write_text(text)
 PY
