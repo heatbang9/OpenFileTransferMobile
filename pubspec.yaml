@@ -11,8 +11,11 @@ dependencies:
     sdk: flutter
   grpc: ^4.1.0
   protobuf: ^4.2.0
+  crypto: ^3.0.6
+  cryptography: ^2.7.0
   file_picker: ^10.3.3
   flutter_foreground_task: ^9.2.2
+  path: ^1.9.1
   uuid: ^4.5.1
 
 dev_dependencies:

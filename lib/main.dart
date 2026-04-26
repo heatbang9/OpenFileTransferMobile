@@ -1,9 +1,11 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 
 import 'src/brand/open_file_transfer_brand.dart';
+import 'src/network/mobile_transfer_client.dart';
 import 'src/transfer/background_transfer_service.dart';
 
 final BackgroundTransferService _backgroundTransferService = BackgroundTransferService();
@@ -61,7 +63,12 @@ class DeviceDiscoveryPage extends StatefulWidget {
 }
 
 class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
+  final TextEditingController _addressController = TextEditingController(text: '10.0.2.2:39091');
   String _status = '서버를 찾을 준비가 되었습니다.';
+  String? _selectedFilePath;
+  String? _selectedFileName;
+  TransferReceipt? _lastReceipt;
+  bool _sending = false;
 
   void _markPending(String text) {
     setState(() {
@@ -106,6 +113,94 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
     });
   }
 
+  Future<void> _pickFile() async {
+    final result = await FilePicker.platform.pickFiles(withData: false);
+    final file = result?.files.single;
+    if (file?.path == null) {
+      _markPending('파일 선택이 취소되었습니다.');
+      return;
+    }
+    setState(() {
+      _selectedFilePath = file!.path;
+      _selectedFileName = file.name;
+      _lastReceipt = null;
+      _status = '${file.name} 선택됨';
+    });
+  }
+
+  Future<void> _sendSelectedFile() async {
+    final filePath = _selectedFilePath;
+    final fileName = _selectedFileName;
+    final address = _addressController.text.trim();
+    if (filePath == null || fileName == null) {
+      _markPending('먼저 전송할 파일을 선택하세요.');
+      return;
+    }
+    if (address.isEmpty) {
+      _markPending('PC 서버 주소를 입력하세요.');
+      return;
+    }
+
+    setState(() {
+      _sending = true;
+      _lastReceipt = null;
+      _status = 'PC 서버와 Handshake 중';
+    });
+    MobileTransferClient? client;
+    try {
+      await _backgroundTransferService.startTransfer(
+        direction: TransferDirection.sending,
+        fileName: fileName,
+      );
+      client = MobileTransferClient(address: address);
+      final receipt = await client.sendFile(
+        filePath,
+        onProgress: (progress) {
+          unawaited(_backgroundTransferService.updateProgress(progress.progress));
+          if (!mounted) {
+            return;
+          }
+          setState(() {
+            _status = '파일 전송 중 · ${(progress.progress * 100).round()}%';
+          });
+        },
+      );
+      await _backgroundTransferService.completeTransfer();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _lastReceipt = receipt;
+        _status = '${receipt.fileName} 전송 완료';
+      });
+    } catch (error) {
+      await _backgroundTransferService.stop();
+      if (!mounted) {
+        return;
+      }
+      setStatusWithError(error);
+    } finally {
+      await client?.close();
+      if (mounted) {
+        setState(() {
+          _sending = false;
+        });
+      }
+    }
+  }
+
+  void setStatusWithError(Object error) {
+    setState(() {
+      _status = '전송 실패: $error';
+    });
+  }
+
+  @override
+  void dispose() {
+    _addressController.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -130,9 +225,13 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
             ),
             const SizedBox(height: 16),
             _TransferPanel(
-              onDiscover: () => _markPending('SSDP 탐색 구현 대기 중'),
-              onPickFile: () => _markPending('파일 선택 구현 대기 중'),
-              onSend: () => _startBackgroundTransfer(TransferDirection.sending),
+              addressController: _addressController,
+              selectedFileName: _selectedFileName,
+              lastReceipt: _lastReceipt,
+              sending: _sending,
+              onDiscover: () => _markPending('SSDP 자동 탐색은 다음 단계입니다. 지금은 PC 서버 주소를 직접 입력하세요.'),
+              onPickFile: _pickFile,
+              onSend: _sendSelectedFile,
             ),
             const SizedBox(height: 16),
             _BackgroundTransferPanel(
@@ -223,11 +322,19 @@ class _DiscoveryPanel extends StatelessWidget {
 
 class _TransferPanel extends StatelessWidget {
   const _TransferPanel({
+    required this.addressController,
+    required this.selectedFileName,
+    required this.lastReceipt,
+    required this.sending,
     required this.onDiscover,
     required this.onPickFile,
     required this.onSend,
   });
 
+  final TextEditingController addressController;
+  final String? selectedFileName;
+  final TransferReceipt? lastReceipt;
+  final bool sending;
   final VoidCallback onDiscover;
   final VoidCallback onPickFile;
   final VoidCallback onSend;
@@ -239,11 +346,33 @@ class _TransferPanel extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          TextField(
+            controller: addressController,
+            keyboardType: TextInputType.url,
+            decoration: const InputDecoration(
+              labelText: 'PC 서버 주소',
+              hintText: '예: 192.168.0.10:39091',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 12),
+          _TransferDetailRow(
+            label: '선택 파일',
+            value: selectedFileName ?? '없음',
+          ),
+          if (lastReceipt != null) ...[
+            const SizedBox(height: 8),
+            _TransferDetailRow(
+              label: '서버 저장',
+              value: '${lastReceipt!.fileName} · ${lastReceipt!.size} bytes',
+            ),
+          ],
+          const SizedBox(height: 12),
           Row(
             children: [
               Expanded(
                 child: OutlinedButton.icon(
-                  onPressed: onPickFile,
+                  onPressed: sending ? null : onPickFile,
                   icon: const Icon(Icons.insert_drive_file_rounded),
                   label: const Text('파일 선택'),
                 ),
@@ -251,9 +380,9 @@ class _TransferPanel extends StatelessWidget {
               const SizedBox(width: 8),
               Expanded(
                 child: OutlinedButton.icon(
-                  onPressed: onSend,
+                  onPressed: sending ? null : onSend,
                   icon: Icon(iconForTransferDirection(true)),
-                  label: const Text('파일 보내기'),
+                  label: Text(sending ? '보내는 중' : '파일 보내기'),
                 ),
               ),
             ],
@@ -265,6 +394,50 @@ class _TransferPanel extends StatelessWidget {
             label: const Text('받을 서버를 먼저 찾기'),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _TransferDetailRow extends StatelessWidget {
+  const _TransferDetailRow({
+    required this.label,
+    required this.value,
+  });
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: OpenFileTransferColors.mint50,
+        border: Border.all(color: OpenFileTransferColors.mint300),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Row(
+          children: [
+            SizedBox(
+              width: 78,
+              child: Text(
+                label,
+                style: const TextStyle(
+                  color: OpenFileTransferColors.teal900,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+            Expanded(
+              child: Text(
+                value,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
