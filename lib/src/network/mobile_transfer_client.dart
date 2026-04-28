@@ -12,7 +12,7 @@ import 'package:uuid/uuid.dart';
 
 import '../protocol/transfer_messages.dart';
 
-export '../protocol/transfer_messages.dart' show ServerEvent, TransferReceipt;
+export '../protocol/transfer_messages.dart' show FileEntry, ServerEvent, TransferReceipt;
 
 final _hkdfSalt = Uint8List.fromList('openfiletransfer-v1-session'.codeUnits);
 final _hkdfInfo = Uint8List.fromList('openfiletransfer-file-payload'.codeUnits);
@@ -77,6 +77,20 @@ class OpenFileTransferProgress {
   final double progress;
 }
 
+class ReceivedFileResult {
+  const ReceivedFileResult({
+    required this.fileName,
+    required this.outputPath,
+    required this.size,
+    required this.sha256Hex,
+  });
+
+  final String fileName;
+  final String outputPath;
+  final int size;
+  final String sha256Hex;
+}
+
 class OpenFileTransferGrpcClient extends Client {
   OpenFileTransferGrpcClient(super.channel);
 
@@ -94,6 +108,20 @@ class OpenFileTransferGrpcClient extends Client {
     TransferReceipt.fromBuffer,
   );
 
+  static final ClientMethod<ListFilesRequest, ListFilesResponse> _listFiles =
+      ClientMethod<ListFilesRequest, ListFilesResponse>(
+    '/openfiletransfer.v1.TransferService/ListFiles',
+    (request) => request.writeToBuffer(),
+    ListFilesResponse.fromBuffer,
+  );
+
+  static final ClientMethod<FileRequest, FileChunk> _receiveFile =
+      ClientMethod<FileRequest, FileChunk>(
+    '/openfiletransfer.v1.TransferService/ReceiveFile',
+    (request) => request.writeToBuffer(),
+    FileChunk.fromBuffer,
+  );
+
   static final ClientMethod<EventSubscription, ServerEvent> _subscribeEvents =
       ClientMethod<EventSubscription, ServerEvent>(
     '/openfiletransfer.v1.TransferService/SubscribeEvents',
@@ -107,6 +135,14 @@ class OpenFileTransferGrpcClient extends Client {
 
   ResponseFuture<TransferReceipt> sendFile(Stream<FileChunk> request) {
     return $createStreamingCall(_sendFile, request).single;
+  }
+
+  ResponseFuture<ListFilesResponse> listFiles(ListFilesRequest request) {
+    return $createUnaryCall(_listFiles, request);
+  }
+
+  ResponseStream<FileChunk> receiveFile(FileRequest request) {
+    return $createStreamingCall(_receiveFile, Stream<FileRequest>.value(request));
   }
 
   ResponseStream<ServerEvent> subscribeEvents(EventSubscription request) {
@@ -230,6 +266,79 @@ class MobileTransferClient {
     return receipt;
   }
 
+  Future<List<FileEntry>> listFiles() async {
+    final session = await handshake();
+    final response = await _grpcClient.listFiles(
+      ListFilesRequest(sessionId: session.sessionId),
+    );
+    return response.files;
+  }
+
+  Future<ReceivedFileResult> receiveFile(
+    FileEntry file,
+    String outputDirectory, {
+    void Function(OpenFileTransferProgress progress)? onProgress,
+  }) async {
+    final session = await handshake();
+    final directory = Directory(outputDirectory);
+    await directory.create(recursive: true);
+    final outputPath = await _availableOutputPath(directory.path, file.fileName);
+    final outputFile = File(outputPath);
+    final sink = outputFile.openWrite();
+    final digestSink = AccumulatorSink<crypto.Digest>();
+    final hashInput = crypto.sha256.startChunkedConversion(digestSink);
+    var size = 0;
+    var expectedSha256 = file.sha256Hex;
+
+    try {
+      final stream = _grpcClient.receiveFile(
+        FileRequest(sessionId: session.sessionId, fileId: file.fileId),
+      );
+      await for (final chunk in stream) {
+        final plain = chunk.encrypted
+            ? await _decryptChunk(
+                session.sessionKey,
+                nonce: chunk.nonce,
+                data: chunk.data,
+                authTag: chunk.authTag,
+              )
+            : chunk.data;
+        sink.add(plain);
+        hashInput.add(plain);
+        size += plain.length;
+        if (chunk.sha256Hex.isNotEmpty) {
+          expectedSha256 = chunk.sha256Hex;
+        }
+        final totalSize = chunk.totalSize > 0 ? chunk.totalSize : file.size;
+        onProgress?.call(
+          OpenFileTransferProgress(
+            sentBytes: size,
+            totalBytes: totalSize,
+            progress: totalSize == 0 ? 0 : size / totalSize,
+          ),
+        );
+      }
+    } catch (_) {
+      await sink.close();
+      hashInput.close();
+      rethrow;
+    }
+
+    await sink.close();
+    hashInput.close();
+    final localSha256 = digestSink.events.single.toString();
+    if (expectedSha256.isNotEmpty && expectedSha256 != localSha256) {
+      throw StateError('수신 파일 해시가 일치하지 않습니다.');
+    }
+
+    return ReceivedFileResult(
+      fileName: file.fileName,
+      outputPath: outputPath,
+      size: size,
+      sha256Hex: localSha256,
+    );
+  }
+
   Future<MobileEventSubscription> subscribeEvents({
     void Function(ServerEvent event)? onEvent,
     void Function(Object error)? onError,
@@ -262,6 +371,31 @@ class MobileTransferClient {
       secretKey: sessionKey,
       nonce: _randomNonce(),
     );
+  }
+
+  Future<List<int>> _decryptChunk(
+    SecretKey sessionKey, {
+    required List<int> nonce,
+    required List<int> data,
+    required List<int> authTag,
+  }) {
+    return AesGcm.with256bits().decrypt(
+      SecretBox(data, nonce: nonce, mac: Mac(authTag)),
+      secretKey: sessionKey,
+    );
+  }
+
+  Future<String> _availableOutputPath(String directory, String fileName) async {
+    final safeName = p.basename(fileName.isEmpty ? 'openfiletransfer-download.bin' : fileName);
+    final extension = p.extension(safeName);
+    final baseName = p.basenameWithoutExtension(safeName);
+    var candidate = p.join(directory, safeName);
+    var index = 1;
+    while (await File(candidate).exists()) {
+      candidate = p.join(directory, '$baseName-$index$extension');
+      index += 1;
+    }
+    return candidate;
   }
 
   List<int> _randomNonce() {

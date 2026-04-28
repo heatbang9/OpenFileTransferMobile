@@ -1,8 +1,10 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
+import 'package:path_provider/path_provider.dart';
 
 import 'src/brand/open_file_transfer_brand.dart';
 import 'src/device/device_profile_store.dart';
@@ -78,9 +80,13 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
   String? _selectedFilePath;
   String? _selectedFileName;
   TransferReceipt? _lastReceipt;
+  List<FileEntry> _serverFiles = const <FileEntry>[];
+  ReceivedFileResult? _lastReceivedFile;
   bool _discovering = false;
   bool _subscribing = false;
   bool _sending = false;
+  bool _loadingInbox = false;
+  bool _receiving = false;
 
   void _markPending(String text) {
     setState(() {
@@ -156,6 +162,8 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
       _selectedServer = server;
       _addressController.text = server.address;
       _lastReceipt = null;
+      _serverFiles = const <FileEntry>[];
+      _lastReceivedFile = null;
       _status = '${server.deviceName}에 연결할 준비가 되었습니다.';
     });
   }
@@ -190,6 +198,9 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
             }
             _status = '서버 이벤트 수신: ${event.message}';
           });
+          if (event.type == 'file_received') {
+            unawaited(_refreshInbox());
+          }
         },
         onError: (error) {
           if (!mounted) {
@@ -363,9 +374,114 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
     }
   }
 
-  void setStatusWithError(Object error) {
+  Future<void> _refreshInbox() async {
+    final address = _addressController.text.trim();
+    if (address.isEmpty) {
+      _markPending('조회할 PC 서버 주소를 입력하세요.');
+      return;
+    }
     setState(() {
-      _status = '전송 실패: $error';
+      _loadingInbox = true;
+      _status = '서버 수신함 조회 중';
+    });
+
+    MobileTransferClient? client;
+    try {
+      final profile = _deviceProfile ?? await _deviceProfileStore.load();
+      client = MobileTransferClient(
+        address: address,
+        clientDeviceId: profile.deviceId,
+        clientName: profile.deviceName,
+      );
+      final files = await client.listFiles();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _serverFiles = files;
+        _status = files.isEmpty ? '서버 수신함이 비어 있습니다.' : '서버 파일 ${files.length}개 조회 완료';
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setStatusWithError(error, action: '수신함 조회');
+    } finally {
+      await client?.close();
+      if (mounted) {
+        setState(() {
+          _loadingInbox = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _receiveServerFile(FileEntry file) async {
+    final address = _addressController.text.trim();
+    if (address.isEmpty) {
+      _markPending('수신할 PC 서버 주소를 입력하세요.');
+      return;
+    }
+    setState(() {
+      _receiving = true;
+      _lastReceivedFile = null;
+      _status = '${file.fileName} 수신 준비 중';
+    });
+
+    MobileTransferClient? client;
+    try {
+      await _backgroundTransferService.startTransfer(
+        direction: TransferDirection.receiving,
+        fileName: file.fileName,
+      );
+      final documentsDir = await getApplicationDocumentsDirectory();
+      final outputDir = Directory('${documentsDir.path}/OpenFileTransfer');
+      final profile = _deviceProfile ?? await _deviceProfileStore.load();
+      client = MobileTransferClient(
+        address: address,
+        clientDeviceId: profile.deviceId,
+        clientName: profile.deviceName,
+      );
+      final result = await client.receiveFile(
+        file,
+        outputDir.path,
+        onProgress: (progress) {
+          unawaited(_backgroundTransferService.updateProgress(progress.progress));
+          if (!mounted) {
+            return;
+          }
+          setState(() {
+            _status = '파일 수신 중 · ${(progress.progress * 100).round()}%';
+          });
+        },
+      );
+      await _backgroundTransferService.completeTransfer();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _lastReceivedFile = result;
+        _status = '${result.fileName} 수신 완료';
+      });
+    } catch (error) {
+      await _backgroundTransferService.stop();
+      if (!mounted) {
+        return;
+      }
+      setStatusWithError(error, action: '수신');
+    } finally {
+      await client?.close();
+      if (mounted) {
+        setState(() {
+          _receiving = false;
+        });
+      }
+    }
+  }
+
+  void setStatusWithError(Object error, {String action = '전송'}) {
+    setState(() {
+      _status = '$action 실패: $error';
     });
   }
 
@@ -443,7 +559,14 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
               onClear: _clearEvents,
             ),
             const SizedBox(height: 16),
-            const _InboxPanel(),
+            _InboxPanel(
+              files: _serverFiles,
+              loading: _loadingInbox,
+              receiving: _receiving,
+              lastReceivedFile: _lastReceivedFile,
+              onRefresh: _refreshInbox,
+              onReceive: _receiveServerFile,
+            ),
           ],
         ),
       ),
@@ -872,18 +995,102 @@ class _BackgroundTransferPanel extends StatelessWidget {
 }
 
 class _InboxPanel extends StatelessWidget {
-  const _InboxPanel();
+  const _InboxPanel({
+    required this.files,
+    required this.loading,
+    required this.receiving,
+    required this.lastReceivedFile,
+    required this.onRefresh,
+    required this.onReceive,
+  });
+
+  final List<FileEntry> files;
+  final bool loading;
+  final bool receiving;
+  final ReceivedFileResult? lastReceivedFile;
+  final VoidCallback onRefresh;
+  final ValueChanged<FileEntry> onReceive;
 
   @override
   Widget build(BuildContext context) {
     return _BrandedPanel(
       title: '서버 수신함',
       trailing: OutlinedButton.icon(
-        onPressed: null,
+        onPressed: loading ? null : onRefresh,
         icon: const Icon(Icons.inbox_rounded),
-        label: const Text('새로고침'),
+        label: Text(loading ? '조회 중' : '새로고침'),
       ),
-      child: const Text('연결한 서버의 수신 파일 목록이 여기에 표시됩니다.'),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (lastReceivedFile != null) ...[
+            _TransferDetailRow(
+              label: '최근 수신',
+              value: '${lastReceivedFile!.fileName} · ${lastReceivedFile!.size} bytes',
+            ),
+            const SizedBox(height: 10),
+          ],
+          if (files.isEmpty)
+            const Text('연결한 서버의 수신 파일 목록이 여기에 표시됩니다.')
+          else
+            Column(
+              children: files.map((file) {
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: OpenFileTransferColors.mint50,
+                      border: Border.all(color: OpenFileTransferColors.mint300),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Row(
+                        children: [
+                          const Icon(
+                            Icons.insert_drive_file_rounded,
+                            color: OpenFileTransferColors.teal700,
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  file.fileName,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    color: OpenFileTransferColors.ink,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  '${file.size} bytes · ${file.sha256Hex}',
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    color: OpenFileTransferColors.teal900,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          OutlinedButton.icon(
+                            onPressed: receiving ? null : () => onReceive(file),
+                            icon: Icon(iconForTransferDirection(false)),
+                            label: Text(receiving ? '수신 중' : '받기'),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                );
+              }).toList(growable: false),
+            ),
+        ],
+      ),
     );
   }
 }

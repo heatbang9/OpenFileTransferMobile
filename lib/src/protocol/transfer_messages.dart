@@ -117,6 +117,73 @@ class FileChunk {
   final bool encrypted;
   final String sha256Hex;
 
+  static FileChunk fromBuffer(List<int> bytes) {
+    final reader = ProtoReader(bytes);
+    var sessionId = '';
+    var transferId = '';
+    var fileName = '';
+    var totalSize = 0;
+    var offset = 0;
+    var nonce = <int>[];
+    var data = <int>[];
+    var authTag = <int>[];
+    var encrypted = false;
+    var sha256Hex = '';
+
+    while (!reader.isAtEnd) {
+      final tag = reader.readTag();
+      final field = tag >> 3;
+      final wireType = tag & 7;
+      switch (field) {
+        case 1:
+          sessionId = reader.readString();
+          break;
+        case 2:
+          transferId = reader.readString();
+          break;
+        case 3:
+          fileName = reader.readString();
+          break;
+        case 4:
+          totalSize = reader.readVarint();
+          break;
+        case 5:
+          offset = reader.readVarint();
+          break;
+        case 6:
+          nonce = reader.readLengthDelimited();
+          break;
+        case 7:
+          data = reader.readLengthDelimited();
+          break;
+        case 8:
+          authTag = reader.readLengthDelimited();
+          break;
+        case 9:
+          encrypted = reader.readBool();
+          break;
+        case 10:
+          sha256Hex = reader.readString();
+          break;
+        default:
+          reader.skipField(wireType);
+      }
+    }
+
+    return FileChunk(
+      sessionId: sessionId,
+      transferId: transferId,
+      fileName: fileName,
+      totalSize: totalSize,
+      offset: offset,
+      nonce: nonce,
+      data: data,
+      authTag: authTag,
+      encrypted: encrypted,
+      sha256Hex: sha256Hex,
+    );
+  }
+
   List<int> writeToBuffer() {
     return (ProtoWriter()
           ..writeString(1, sessionId)
@@ -130,6 +197,18 @@ class FileChunk {
           ..writeBool(9, encrypted)
           ..writeString(10, sha256Hex))
         .takeBytes();
+  }
+}
+
+class ListFilesRequest {
+  const ListFilesRequest({
+    required this.sessionId,
+  });
+
+  final String sessionId;
+
+  List<int> writeToBuffer() {
+    return (ProtoWriter()..writeString(1, sessionId)).takeBytes();
   }
 }
 
@@ -292,6 +371,51 @@ class FileEntry {
       sha256Hex: sha256Hex,
       receivedAtUnixTimeMs: receivedAtUnixTimeMs,
     );
+  }
+}
+
+class ListFilesResponse {
+  const ListFilesResponse({
+    required this.files,
+  });
+
+  final List<FileEntry> files;
+
+  static ListFilesResponse fromBuffer(List<int> bytes) {
+    final reader = ProtoReader(bytes);
+    final files = <FileEntry>[];
+
+    while (!reader.isAtEnd) {
+      final tag = reader.readTag();
+      final field = tag >> 3;
+      final wireType = tag & 7;
+      switch (field) {
+        case 1:
+          files.add(FileEntry.fromBuffer(reader.readLengthDelimited()));
+          break;
+        default:
+          reader.skipField(wireType);
+      }
+    }
+
+    return ListFilesResponse(files: List<FileEntry>.unmodifiable(files));
+  }
+}
+
+class FileRequest {
+  const FileRequest({
+    required this.sessionId,
+    required this.fileId,
+  });
+
+  final String sessionId;
+  final String fileId;
+
+  List<int> writeToBuffer() {
+    return (ProtoWriter()
+          ..writeString(1, sessionId)
+          ..writeString(2, fileId))
+        .takeBytes();
   }
 }
 
