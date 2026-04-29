@@ -18,6 +18,34 @@ final BackgroundTransferService _backgroundTransferService = BackgroundTransferS
 final DeviceProfileStore _deviceProfileStore = DeviceProfileStore();
 final TrustedDeviceStore _trustedDeviceStore = TrustedDeviceStore();
 
+bool _isMobilePeerServer(DiscoveredServer server) {
+  return server.capabilities.contains('mobile-temporary-server');
+}
+
+class _SendTarget {
+  const _SendTarget({
+    required this.address,
+    required this.deviceName,
+    required this.mobilePeer,
+  });
+
+  final String address;
+  final String deviceName;
+  final bool mobilePeer;
+}
+
+class _SendTargetResult {
+  const _SendTargetResult({
+    required this.target,
+    required this.success,
+    required this.message,
+  });
+
+  final _SendTarget target;
+  final bool success;
+  final String message;
+}
+
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   BackgroundTransferService.initCommunicationPort();
@@ -77,12 +105,14 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
   DeviceProfile? _deviceProfile;
   List<DiscoveredServer> _servers = const <DiscoveredServer>[];
   DiscoveredServer? _selectedServer;
+  Set<String> _selectedSendTargetIds = const <String>{};
   MobileTransferClient? _eventClient;
   MobileEventSubscription? _eventSubscription;
   final List<ServerEvent> _events = <ServerEvent>[];
   String? _selectedFilePath;
   String? _selectedFileName;
   TransferReceipt? _lastReceipt;
+  List<_SendTargetResult> _sendResults = const <_SendTargetResult>[];
   List<FileEntry> _serverFiles = const <FileEntry>[];
   ReceivedFileResult? _lastReceivedFile;
   ActiveMobileTransferServer? _mobileServer;
@@ -201,6 +231,9 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
       }
       setState(() {
         _servers = servers;
+        _selectedSendTargetIds = _selectedSendTargetIds
+            .where((id) => servers.any((server) => server.deviceId == id))
+            .toSet();
         _status = servers.isEmpty ? '찾은 서버가 없습니다.' : '서버 ${servers.length}개를 찾았습니다.';
       });
     } catch (error) {
@@ -224,9 +257,25 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
       _selectedServer = server;
       _addressController.text = server.address;
       _lastReceipt = null;
+      _sendResults = const <_SendTargetResult>[];
       _serverFiles = const <FileEntry>[];
       _lastReceivedFile = null;
       _status = '${server.deviceName}에 연결할 준비가 되었습니다.';
+    });
+  }
+
+  void _toggleSendTarget(DiscoveredServer server) {
+    final next = Set<String>.from(_selectedSendTargetIds);
+    if (next.contains(server.deviceId)) {
+      next.remove(server.deviceId);
+    } else {
+      next.add(server.deviceId);
+    }
+    setState(() {
+      _selectedSendTargetIds = next;
+      _selectedServer = server;
+      _addressController.text = server.address;
+      _status = next.isEmpty ? '1:N 전송 대상이 비었습니다.' : '1:N 전송 대상 ${next.length}개 선택됨';
     });
   }
 
@@ -370,6 +419,53 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
     });
   }
 
+  List<_SendTarget> _currentSendTargets(String manualAddress) {
+    final discoveredTargets = _servers
+        .where((server) => _selectedSendTargetIds.contains(server.deviceId))
+        .map(
+          (server) => _SendTarget(
+            address: server.address,
+            deviceName: server.deviceName,
+            mobilePeer: _isMobilePeerServer(server),
+          ),
+        )
+        .toList(growable: false);
+    if (discoveredTargets.isNotEmpty) {
+      return discoveredTargets;
+    }
+    if (manualAddress.isEmpty) {
+      return const <_SendTarget>[];
+    }
+    final selected = _selectedServer;
+    return <_SendTarget>[
+      _SendTarget(
+        address: manualAddress,
+        deviceName: selected?.deviceName ?? '직접 입력 서버',
+        mobilePeer: selected == null ? false : _isMobilePeerServer(selected),
+      ),
+    ];
+  }
+
+  Future<TransferReceipt> _sendFileToTarget({
+    required _SendTarget target,
+    required String filePath,
+    required void Function(OpenFileTransferProgress progress) onProgress,
+  }) async {
+    MobileTransferClient? client;
+    try {
+      final profile = _deviceProfile ?? await _deviceProfileStore.load();
+      client = MobileTransferClient(
+        address: target.address,
+        clientDeviceId: profile.deviceId,
+        clientName: profile.deviceName,
+      );
+      final receipt = await client.sendFile(filePath, onProgress: onProgress);
+      return receipt;
+    } finally {
+      await client?.close();
+    }
+  }
+
   Future<void> _sendSelectedFile() async {
     final filePath = _selectedFilePath;
     final fileName = _selectedFileName;
@@ -378,47 +474,83 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
       _markPending('먼저 전송할 파일을 선택하세요.');
       return;
     }
-    if (address.isEmpty) {
-      _markPending('PC 서버 주소를 입력하세요.');
+    final targets = _currentSendTargets(address);
+    if (targets.isEmpty) {
+      _markPending('전송할 서버를 선택하거나 주소를 입력하세요.');
       return;
     }
 
     setState(() {
       _sending = true;
       _lastReceipt = null;
-      _status = 'PC 서버와 Handshake 중';
+      _sendResults = const <_SendTargetResult>[];
+      _status = targets.length == 1 ? '서버와 Handshake 중' : '1:N 전송 준비 중 · ${targets.length}개 대상';
     });
-    MobileTransferClient? client;
+    final results = <_SendTargetResult>[];
+    TransferReceipt? lastReceipt;
     try {
       await _backgroundTransferService.startTransfer(
         direction: TransferDirection.sending,
         fileName: fileName,
       );
-      final profile = _deviceProfile ?? await _deviceProfileStore.load();
-      client = MobileTransferClient(
-        address: address,
-        clientDeviceId: profile.deviceId,
-        clientName: profile.deviceName,
-      );
-      final receipt = await client.sendFile(
-        filePath,
-        onProgress: (progress) {
-          unawaited(_backgroundTransferService.updateProgress(progress.progress));
-          if (!mounted) {
-            return;
-          }
+      for (var index = 0; index < targets.length; index += 1) {
+        final target = targets[index];
+        try {
+          final receipt = await _sendFileToTarget(
+            target: target,
+            filePath: filePath,
+            onProgress: (progress) {
+              final combinedProgress = (index + progress.progress) / targets.length;
+              unawaited(_backgroundTransferService.updateProgress(combinedProgress));
+              if (!mounted) {
+                return;
+              }
+              setState(() {
+                final percent = (progress.progress * 100).round();
+                _status = '${target.deviceName} 전송 중 · $percent%';
+              });
+            },
+          );
+          lastReceipt = receipt;
+          results.add(
+            _SendTargetResult(
+              target: target,
+              success: true,
+              message: '${receipt.fileName} · ${receipt.size} bytes',
+            ),
+          );
+        } catch (error) {
+          results.add(
+            _SendTargetResult(
+              target: target,
+              success: false,
+              message: error.toString(),
+            ),
+          );
+        }
+        if (mounted) {
           setState(() {
-            _status = '파일 전송 중 · ${(progress.progress * 100).round()}%';
+            _sendResults = List<_SendTargetResult>.unmodifiable(results);
           });
-        },
-      );
-      await _backgroundTransferService.completeTransfer();
+        }
+      }
+
+      final successCount = results.where((result) => result.success).length;
+      if (successCount == 0) {
+        await _backgroundTransferService.stop();
+      } else {
+        await _backgroundTransferService.completeTransfer();
+      }
       if (!mounted) {
         return;
       }
       setState(() {
-        _lastReceipt = receipt;
-        _status = '${receipt.fileName} 전송 완료';
+        _lastReceipt = lastReceipt;
+        _status = successCount == 0
+            ? '전송 실패 · 0/${targets.length}'
+            : (successCount == targets.length
+                ? '전송 완료 · $successCount/${targets.length}'
+                : '전송 일부 완료 · $successCount/${targets.length}');
       });
     } catch (error) {
       await _backgroundTransferService.stop();
@@ -427,7 +559,6 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
       }
       setStatusWithError(error);
     } finally {
-      await client?.close();
       if (mounted) {
         setState(() {
           _sending = false;
@@ -744,15 +875,19 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
               discovering: _discovering,
               servers: _servers,
               selectedServer: _selectedServer,
+              selectedSendTargetIds: _selectedSendTargetIds,
               onDiscover: _discoverServers,
               onSelectServer: _selectServer,
+              onToggleSendTarget: _toggleSendTarget,
             ),
             const SizedBox(height: 16),
             _TransferPanel(
               addressController: _addressController,
               selectedFileName: _selectedFileName,
               lastReceipt: _lastReceipt,
+              sendResults: _sendResults,
               selectedServer: _selectedServer,
+              selectedSendTargetCount: _selectedSendTargetIds.length,
               sending: _sending,
               onDiscover: _discoverServers,
               onPickFile: _pickFile,
@@ -906,15 +1041,19 @@ class _DiscoveryPanel extends StatelessWidget {
     required this.discovering,
     required this.servers,
     required this.selectedServer,
+    required this.selectedSendTargetIds,
     required this.onDiscover,
     required this.onSelectServer,
+    required this.onToggleSendTarget,
   });
 
   final bool discovering;
   final List<DiscoveredServer> servers;
   final DiscoveredServer? selectedServer;
+  final Set<String> selectedSendTargetIds;
   final VoidCallback onDiscover;
   final ValueChanged<DiscoveredServer> onSelectServer;
+  final ValueChanged<DiscoveredServer> onToggleSendTarget;
 
   @override
   Widget build(BuildContext context) {
@@ -935,7 +1074,9 @@ class _DiscoveryPanel extends StatelessWidget {
                   child: _ServerTile(
                     server: server,
                     selected: selected,
+                    sendTarget: selectedSendTargetIds.contains(server.deviceId),
                     onTap: () => onSelectServer(server),
+                    onToggleSendTarget: () => onToggleSendTarget(server),
                   ),
                 );
               }).toList(growable: false),
@@ -948,12 +1089,16 @@ class _ServerTile extends StatelessWidget {
   const _ServerTile({
     required this.server,
     required this.selected,
+    required this.sendTarget,
     required this.onTap,
+    required this.onToggleSendTarget,
   });
 
   final DiscoveredServer server;
   final bool selected;
+  final bool sendTarget;
   final VoidCallback onTap;
+  final VoidCallback onToggleSendTarget;
 
   @override
   Widget build(BuildContext context) {
@@ -973,7 +1118,9 @@ class _ServerTile extends StatelessWidget {
           child: Row(
             children: [
               Icon(
-                selected ? Icons.check_circle_rounded : Icons.computer_rounded,
+                selected
+                    ? Icons.check_circle_rounded
+                    : (_isMobilePeerServer(server) ? Icons.smartphone_rounded : Icons.computer_rounded),
                 color: OpenFileTransferColors.teal700,
               ),
               const SizedBox(width: 10),
@@ -991,7 +1138,7 @@ class _ServerTile extends StatelessWidget {
                     ),
                     const SizedBox(height: 2),
                     Text(
-                      '${server.address} · ${server.deviceId}',
+                      '${_isMobilePeerServer(server) ? '모바일 수신 모드' : 'PC/서버'} · ${server.address} · ${server.deviceId}',
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
                         color: OpenFileTransferColors.teal900,
@@ -1000,6 +1147,11 @@ class _ServerTile extends StatelessWidget {
                     ),
                   ],
                 ),
+              ),
+              const SizedBox(width: 8),
+              Checkbox(
+                value: sendTarget,
+                onChanged: (_) => onToggleSendTarget(),
               ),
             ],
           ),
@@ -1014,7 +1166,9 @@ class _TransferPanel extends StatelessWidget {
     required this.addressController,
     required this.selectedFileName,
     required this.lastReceipt,
+    required this.sendResults,
     required this.selectedServer,
+    required this.selectedSendTargetCount,
     required this.sending,
     required this.onDiscover,
     required this.onPickFile,
@@ -1024,7 +1178,9 @@ class _TransferPanel extends StatelessWidget {
   final TextEditingController addressController;
   final String? selectedFileName;
   final TransferReceipt? lastReceipt;
+  final List<_SendTargetResult> sendResults;
   final DiscoveredServer? selectedServer;
+  final int selectedSendTargetCount;
   final bool sending;
   final VoidCallback onDiscover;
   final VoidCallback onPickFile;
@@ -1049,9 +1205,11 @@ class _TransferPanel extends StatelessWidget {
           const SizedBox(height: 12),
           _TransferDetailRow(
             label: '선택 서버',
-            value: selectedServer == null
-                ? '직접 입력 또는 서버 찾기'
-                : '${selectedServer!.deviceName} (${selectedServer!.address})',
+            value: selectedSendTargetCount > 0
+                ? '1:N 전송 대상 $selectedSendTargetCount개'
+                : (selectedServer == null
+                    ? '직접 입력 또는 서버 찾기'
+                    : '${selectedServer!.deviceName} (${selectedServer!.address})'),
           ),
           const SizedBox(height: 8),
           _TransferDetailRow(
@@ -1063,6 +1221,66 @@ class _TransferPanel extends StatelessWidget {
             _TransferDetailRow(
               label: '서버 저장',
               value: '${lastReceipt!.fileName} · ${lastReceipt!.size} bytes',
+            ),
+          ],
+          if (sendResults.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Column(
+              children: sendResults.map((result) {
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: result.success ? OpenFileTransferColors.mint50 : Colors.white,
+                      border: Border.all(color: OpenFileTransferColors.mint300),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Row(
+                        children: [
+                          Icon(
+                            result.success
+                                ? Icons.check_circle_rounded
+                                : Icons.error_outline_rounded,
+                            color: OpenFileTransferColors.teal700,
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  result.target.deviceName,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    color: OpenFileTransferColors.ink,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                                const SizedBox(height: 2),
+                                Builder(
+                                  builder: (_) {
+                                    final typeLabel = result.target.mobilePeer ? '모바일' : '서버';
+                                    return Text(
+                                      '$typeLabel · ${result.target.address} · ${result.message}',
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        color: OpenFileTransferColors.teal900,
+                                        fontSize: 12,
+                                      ),
+                                    );
+                                  },
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                );
+              }).toList(growable: false),
             ),
           ],
           const SizedBox(height: 12),
@@ -1080,7 +1298,11 @@ class _TransferPanel extends StatelessWidget {
                 child: OutlinedButton.icon(
                   onPressed: sending ? null : onSend,
                   icon: Icon(iconForTransferDirection(true)),
-                  label: Text(sending ? '보내는 중' : '파일 보내기'),
+                  label: Text(
+                    sending
+                        ? '보내는 중'
+                        : (selectedSendTargetCount > 1 ? '1:N 보내기' : '파일 보내기'),
+                  ),
                 ),
               ),
             ],
