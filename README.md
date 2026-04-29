@@ -30,6 +30,10 @@ GitHub Actions에서 다음을 확인합니다.
 
 현재 로컬 환경에는 Flutter SDK가 없어서 CI 기반 검증을 사용합니다.
 
+## 빌드와 배포
+
+Android/iOS 릴리즈 빌드, 계정 준비, OS 제약, 스토어 배포 절차는 [docs/build-and-release.md](docs/build-and-release.md)에 정리했습니다.
+
 ## 백그라운드 전송
 
 Android는 전송/수신 중 앱을 나가도 작업을 계속 유지하기 위해 foreground service를 사용합니다. 구현 기준은 `flutter_foreground_task`이며, Android 14 이상 요구사항에 맞춰 `dataSync` foreground service type을 선언합니다.
