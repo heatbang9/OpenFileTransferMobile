@@ -11,5 +11,8 @@ class MobileImplementationPlan {
         'Android foreground service로 앱 이탈 후 전송 진행률 알림 유지',
         'file_picker로 파일 선택 후 SendFile 스트리밍 전송 완료',
         '서버 수신함 조회와 다운로드 UI 구현',
+        '모바일 서버 롤, 모바일-to-모바일 SSDP 광고, 수신 승인 팝업 설계 필요',
+        '모바일 1:N 다중 전송 UI와 전송 큐 구현 필요',
+        '모바일 화이트리스트 승인/해제 저장소와 전송 승인 UX 구현 필요',
       ];
 }
