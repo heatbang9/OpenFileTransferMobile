@@ -15,6 +15,43 @@ class HandshakeRequest {
   final List<int> clientPublicKey;
   final List<String> supportedCiphers;
 
+  static HandshakeRequest fromBuffer(List<int> bytes) {
+    final reader = ProtoReader(bytes);
+    var clientDeviceId = '';
+    var clientName = '';
+    var clientPublicKey = <int>[];
+    final supportedCiphers = <String>[];
+
+    while (!reader.isAtEnd) {
+      final tag = reader.readTag();
+      final field = tag >> 3;
+      final wireType = tag & 7;
+      switch (field) {
+        case 1:
+          clientDeviceId = reader.readString();
+          break;
+        case 2:
+          clientName = reader.readString();
+          break;
+        case 3:
+          clientPublicKey = reader.readLengthDelimited();
+          break;
+        case 4:
+          supportedCiphers.add(reader.readString());
+          break;
+        default:
+          reader.skipField(wireType);
+      }
+    }
+
+    return HandshakeRequest(
+      clientDeviceId: clientDeviceId,
+      clientName: clientName,
+      clientPublicKey: clientPublicKey,
+      supportedCiphers: List<String>.unmodifiable(supportedCiphers),
+    );
+  }
+
   List<int> writeToBuffer() {
     final writer = ProtoWriter()
       ..writeString(1, clientDeviceId)
@@ -43,6 +80,17 @@ class HandshakeResponse {
   final List<int> serverPublicKey;
   final String selectedCipher;
   final int expiresAtUnixTimeMs;
+
+  List<int> writeToBuffer() {
+    return (ProtoWriter()
+          ..writeString(1, sessionId)
+          ..writeString(2, serverDeviceId)
+          ..writeString(3, serverName)
+          ..writeBytes(4, serverPublicKey)
+          ..writeString(5, selectedCipher)
+          ..writeUint64(6, expiresAtUnixTimeMs))
+        .takeBytes();
+  }
 
   static HandshakeResponse fromBuffer(List<int> bytes) {
     final reader = ProtoReader(bytes);
@@ -207,6 +255,24 @@ class ListFilesRequest {
 
   final String sessionId;
 
+  static ListFilesRequest fromBuffer(List<int> bytes) {
+    final reader = ProtoReader(bytes);
+    var sessionId = '';
+    while (!reader.isAtEnd) {
+      final tag = reader.readTag();
+      final field = tag >> 3;
+      final wireType = tag & 7;
+      switch (field) {
+        case 1:
+          sessionId = reader.readString();
+          break;
+        default:
+          reader.skipField(wireType);
+      }
+    }
+    return ListFilesRequest(sessionId: sessionId);
+  }
+
   List<int> writeToBuffer() {
     return (ProtoWriter()..writeString(1, sessionId)).takeBytes();
   }
@@ -224,6 +290,43 @@ class EventSubscription {
   final String clientDeviceId;
   final String clientName;
   final List<String> eventTypes;
+
+  static EventSubscription fromBuffer(List<int> bytes) {
+    final reader = ProtoReader(bytes);
+    var sessionId = '';
+    var clientDeviceId = '';
+    var clientName = '';
+    final eventTypes = <String>[];
+
+    while (!reader.isAtEnd) {
+      final tag = reader.readTag();
+      final field = tag >> 3;
+      final wireType = tag & 7;
+      switch (field) {
+        case 1:
+          sessionId = reader.readString();
+          break;
+        case 2:
+          clientDeviceId = reader.readString();
+          break;
+        case 3:
+          clientName = reader.readString();
+          break;
+        case 4:
+          eventTypes.add(reader.readString());
+          break;
+        default:
+          reader.skipField(wireType);
+      }
+    }
+
+    return EventSubscription(
+      sessionId: sessionId,
+      clientDeviceId: clientDeviceId,
+      clientName: clientName,
+      eventTypes: List<String>.unmodifiable(eventTypes),
+    );
+  }
 
   List<int> writeToBuffer() {
     final writer = ProtoWriter()
@@ -257,6 +360,22 @@ class ServerEvent {
   final String peerDeviceId;
   final String peerName;
   final FileEntry? file;
+
+  List<int> writeToBuffer() {
+    final writer = ProtoWriter()
+      ..writeString(1, eventId)
+      ..writeString(2, type)
+      ..writeUint64(3, unixTimeMs)
+      ..writeString(4, message)
+      ..writeString(5, sessionId)
+      ..writeString(6, peerDeviceId)
+      ..writeString(7, peerName);
+    final currentFile = file;
+    if (currentFile != null) {
+      writer.writeBytes(8, currentFile.writeToBuffer());
+    }
+    return writer.takeBytes();
+  }
 
   static ServerEvent fromBuffer(List<int> bytes) {
     final reader = ProtoReader(bytes);
@@ -331,6 +450,16 @@ class FileEntry {
   final String sha256Hex;
   final int receivedAtUnixTimeMs;
 
+  List<int> writeToBuffer() {
+    return (ProtoWriter()
+          ..writeString(1, fileId)
+          ..writeString(2, fileName)
+          ..writeUint64(3, size)
+          ..writeString(4, sha256Hex)
+          ..writeUint64(5, receivedAtUnixTimeMs))
+        .takeBytes();
+  }
+
   static FileEntry fromBuffer(List<int> bytes) {
     final reader = ProtoReader(bytes);
     var fileId = '';
@@ -380,6 +509,14 @@ class ListFilesResponse {
   });
 
   final List<FileEntry> files;
+
+  List<int> writeToBuffer() {
+    final writer = ProtoWriter();
+    for (final file in files) {
+      writer.writeBytes(1, file.writeToBuffer());
+    }
+    return writer.takeBytes();
+  }
 
   static ListFilesResponse fromBuffer(List<int> bytes) {
     final reader = ProtoReader(bytes);
@@ -435,6 +572,17 @@ class TransferReceipt {
   final int size;
   final String sha256Hex;
   final bool stored;
+
+  List<int> writeToBuffer() {
+    return (ProtoWriter()
+          ..writeString(1, transferId)
+          ..writeString(2, fileId)
+          ..writeString(3, fileName)
+          ..writeUint64(4, size)
+          ..writeString(5, sha256Hex)
+          ..writeBool(6, stored))
+        .takeBytes();
+  }
 
   static TransferReceipt fromBuffer(List<int> bytes) {
     final reader = ProtoReader(bytes);

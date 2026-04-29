@@ -10,6 +10,7 @@ import 'src/brand/open_file_transfer_brand.dart';
 import 'src/device/device_profile_store.dart';
 import 'src/discovery/ssdp_discovery_client.dart';
 import 'src/network/mobile_transfer_client.dart';
+import 'src/network/mobile_transfer_server.dart';
 import 'src/transfer/background_transfer_service.dart';
 
 final BackgroundTransferService _backgroundTransferService = BackgroundTransferService();
@@ -82,6 +83,11 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
   TransferReceipt? _lastReceipt;
   List<FileEntry> _serverFiles = const <FileEntry>[];
   ReceivedFileResult? _lastReceivedFile;
+  ActiveMobileTransferServer? _mobileServer;
+  MobileReceivedFile? _lastPeerReceivedFile;
+  Timer? _mobileServerTicker;
+  DateTime? _mobileServerExpiresAt;
+  int _mobileServerSecondsLeft = 0;
   bool _discovering = false;
   bool _subscribing = false;
   bool _sending = false;
@@ -479,6 +485,82 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
     }
   }
 
+  Future<void> _startTemporaryMobileServer() async {
+    if (_mobileServer != null) {
+      _markPending('모바일 수신 모드가 이미 실행 중입니다.');
+      return;
+    }
+    final profile = _deviceProfile ?? await _deviceProfileStore.load();
+    final documentsDir = await getApplicationDocumentsDirectory();
+    final receiveDir = Directory('${documentsDir.path}/OpenFileTransfer/MobileInbox');
+    final server = ActiveMobileTransferServer(
+      deviceId: profile.deviceId,
+      deviceName: profile.deviceName,
+      receiveDirectory: receiveDir.path,
+      ttl: const Duration(minutes: 10),
+      onFileReceived: (file) {
+        if (!mounted) {
+          return;
+        }
+        setState(() {
+          _lastPeerReceivedFile = file;
+          _status = '${file.fileName} 모바일 수신 완료';
+        });
+      },
+    );
+    try {
+      await server.start();
+      if (!mounted) {
+        await server.stop();
+        return;
+      }
+      _mobileServerTicker?.cancel();
+      final expiresAt = DateTime.now().add(const Duration(minutes: 10));
+      setState(() {
+        _mobileServer = server;
+        _mobileServerExpiresAt = expiresAt;
+        _mobileServerSecondsLeft = expiresAt.difference(DateTime.now()).inSeconds;
+        _status = '모바일 수신 모드 시작 · ${server.hostAddress}:${server.grpcPort}';
+      });
+      _mobileServerTicker = Timer.periodic(const Duration(seconds: 1), (_) {
+        final currentServer = _mobileServer;
+        final currentExpiresAt = _mobileServerExpiresAt;
+        if (!mounted || currentServer == null || currentExpiresAt == null) {
+          return;
+        }
+        final secondsLeft = currentExpiresAt.difference(DateTime.now()).inSeconds;
+        if (secondsLeft <= 0) {
+          unawaited(_stopTemporaryMobileServer(updateStatus: true));
+          return;
+        }
+        setState(() {
+          _mobileServerSecondsLeft = secondsLeft;
+        });
+      });
+    } catch (error) {
+      await server.stop();
+      if (!mounted) {
+        return;
+      }
+      setStatusWithError(error, action: '모바일 수신 모드 시작');
+    }
+  }
+
+  Future<void> _stopTemporaryMobileServer({bool updateStatus = true}) async {
+    final server = _mobileServer;
+    _mobileServerTicker?.cancel();
+    _mobileServerTicker = null;
+    _mobileServer = null;
+    _mobileServerExpiresAt = null;
+    _mobileServerSecondsLeft = 0;
+    await server?.stop();
+    if (mounted && updateStatus) {
+      setState(() {
+        _status = '모바일 수신 모드를 중지했습니다.';
+      });
+    }
+  }
+
   void setStatusWithError(Object error, {String action = '전송'}) {
     setState(() {
       _status = '$action 실패: $error';
@@ -488,6 +570,7 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
   @override
   void dispose() {
     unawaited(_unsubscribeEvents(updateStatus: false));
+    unawaited(_stopTemporaryMobileServer(updateStatus: false));
     _addressController.dispose();
     _deviceNameController.dispose();
     super.dispose();
@@ -545,6 +628,19 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
               onComplete: _completeBackgroundTransfer,
               onStop: () {
                 unawaited(_backgroundTransferService.stop());
+              },
+            ),
+            const SizedBox(height: 16),
+            _PeerReceivePanel(
+              active: _mobileServer != null,
+              endpoint: _mobileServer == null
+                  ? null
+                  : '${_mobileServer!.hostAddress}:${_mobileServer!.grpcPort}',
+              secondsLeft: _mobileServerSecondsLeft,
+              lastReceivedFile: _lastPeerReceivedFile,
+              onStart: _startTemporaryMobileServer,
+              onStop: () {
+                unawaited(_stopTemporaryMobileServer());
               },
             ),
             const SizedBox(height: 16),
@@ -1089,6 +1185,70 @@ class _InboxPanel extends StatelessWidget {
                 );
               }).toList(growable: false),
             ),
+        ],
+      ),
+    );
+  }
+}
+
+class _PeerReceivePanel extends StatelessWidget {
+  const _PeerReceivePanel({
+    required this.active,
+    required this.endpoint,
+    required this.secondsLeft,
+    required this.lastReceivedFile,
+    required this.onStart,
+    required this.onStop,
+  });
+
+  final bool active;
+  final String? endpoint;
+  final int secondsLeft;
+  final MobileReceivedFile? lastReceivedFile;
+  final VoidCallback onStart;
+  final VoidCallback onStop;
+
+  @override
+  Widget build(BuildContext context) {
+    final minutes = (secondsLeft ~/ 60).toString().padLeft(2, '0');
+    final seconds = (secondsLeft % 60).toString().padLeft(2, '0');
+    return _BrandedPanel(
+      title: '모바일 수신 모드',
+      trailing: active
+          ? OutlinedButton.icon(
+              onPressed: onStop,
+              icon: const Icon(Icons.stop_circle_rounded),
+              label: const Text('중지'),
+            )
+          : FilledButton.icon(
+              onPressed: onStart,
+              icon: const Icon(Icons.mobile_friendly_rounded),
+              label: const Text('10분 열기'),
+            ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _TransferDetailRow(
+            label: '상태',
+            value: active ? '수신 대기 중 · $minutes:$seconds' : '꺼짐',
+          ),
+          const SizedBox(height: 8),
+          _TransferDetailRow(
+            label: '주소',
+            value: endpoint ?? '수신 모드를 켜면 같은 네트워크에 표시됩니다.',
+          ),
+          if (lastReceivedFile != null) ...[
+            const SizedBox(height: 8),
+            _TransferDetailRow(
+              label: '최근 수신',
+              value: '${lastReceivedFile!.fileName} · ${lastReceivedFile!.size} bytes',
+            ),
+          ],
+          const SizedBox(height: 10),
+          const Text(
+            '다른 모바일에서 서버 찾기를 누르면 이 기기가 임시 OpenFileTransfer 서버로 표시됩니다.',
+            style: TextStyle(color: OpenFileTransferColors.teal900),
+          ),
         ],
       ),
     );
