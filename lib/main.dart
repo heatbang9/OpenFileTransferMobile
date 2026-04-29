@@ -719,18 +719,18 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
   }
 
   void _handlePeerReceiveProgress(MobileTransferProgress progress) {
-    if (_peerReceiveNotificationTransferId != progress.transferId) {
-      _peerReceiveNotificationTransferId = progress.transferId;
-      unawaited(
-        _backgroundTransferService.startTransfer(
+    unawaited(() async {
+      if (_peerReceiveNotificationTransferId != progress.transferId) {
+        _peerReceiveNotificationTransferId = progress.transferId;
+        await _backgroundTransferService.startTransfer(
           direction: progress.direction == MobileTransferDirection.incoming
               ? TransferDirection.receiving
               : TransferDirection.sending,
           fileName: progress.fileName,
-        ),
-      );
-    }
-    unawaited(_backgroundTransferService.updateProgress(progress.progress));
+        );
+      }
+      await _backgroundTransferService.updateProgress(progress.progress);
+    }());
     if (!mounted) {
       return;
     }
@@ -784,11 +784,16 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
       }
       _mobileServerTicker?.cancel();
       final expiresAt = DateTime.now().add(const Duration(minutes: 10));
+      final endpoint = '${server.hostAddress}:${server.grpcPort}';
+      await _backgroundTransferService.startReceiveServer(
+        endpoint: endpoint,
+        secondsLeft: expiresAt.difference(DateTime.now()).inSeconds,
+      );
       setState(() {
         _mobileServer = server;
         _mobileServerExpiresAt = expiresAt;
         _mobileServerSecondsLeft = expiresAt.difference(DateTime.now()).inSeconds;
-        _status = '모바일 수신 모드 시작 · ${server.hostAddress}:${server.grpcPort}';
+        _status = '모바일 수신 모드 시작 · $endpoint';
       });
       _mobileServerTicker = Timer.periodic(const Duration(seconds: 1), (_) {
         final currentServer = _mobileServer;
@@ -801,12 +806,20 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
           unawaited(_stopTemporaryMobileServer(updateStatus: true));
           return;
         }
+        final endpoint = '${currentServer.hostAddress}:${currentServer.grpcPort}';
+        unawaited(
+          _backgroundTransferService.updateReceiveServer(
+            endpoint: endpoint,
+            secondsLeft: secondsLeft,
+          ),
+        );
         setState(() {
           _mobileServerSecondsLeft = secondsLeft;
         });
       });
     } catch (error) {
       await server.stop();
+      await _backgroundTransferService.stopReceiveServer();
       if (!mounted) {
         return;
       }
@@ -824,6 +837,7 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
     _peerReceiveProgress = null;
     _peerReceiveNotificationTransferId = null;
     await server?.stop();
+    await _backgroundTransferService.stopReceiveServer();
     if (mounted && updateStatus) {
       setState(() {
         _status = '모바일 수신 모드를 중지했습니다.';

@@ -17,6 +17,7 @@ class MobileImplementationPlan {
         '모바일-to-모바일 수신 진행률 UI와 Android foreground service 알림 연결',
         '모바일 1:N 다중 전송 UI와 순차 전송 큐 구현',
         '모바일/PC 서버 구분 라벨과 대상별 전송 결과 UI 구현',
-        '백그라운드 상태에서 모바일 서버 롤을 더 오래 유지하는 foreground service 서버화 검토 필요',
+        '모바일 수신 모드 foreground service 수신 대기 알림 유지 구현',
+        '백그라운드 승인 notification action UX 구현 필요',
       ];
 }

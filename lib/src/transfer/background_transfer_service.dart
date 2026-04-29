@@ -42,6 +42,9 @@ class BackgroundTransferSnapshot {
 class BackgroundTransferService extends ChangeNotifier {
   BackgroundTransferSnapshot _snapshot = const BackgroundTransferSnapshot.idle();
   bool _configured = false;
+  bool _receiveServerActive = false;
+  String _receiveServerEndpoint = '';
+  int _receiveServerSecondsLeft = 0;
 
   BackgroundTransferSnapshot get snapshot => _snapshot;
 
@@ -90,22 +93,10 @@ class BackgroundTransferService extends ChangeNotifier {
     await requestNotificationPermission();
 
     final text = _notificationText(direction, fileName, 0);
-    if (await FlutterForegroundTask.isRunningService) {
-      await FlutterForegroundTask.updateService(
-        notificationTitle: 'OpenFileTransfer ${direction.label} 중',
-        notificationText: text,
-        notificationInitialRoute: '/',
-      );
-    } else {
-      await FlutterForegroundTask.startService(
-        serviceId: 8742,
-        serviceTypes: Platform.isAndroid ? [ForegroundServiceTypes.dataSync] : null,
-        notificationTitle: 'OpenFileTransfer ${direction.label} 중',
-        notificationText: text,
-        notificationInitialRoute: '/',
-        callback: openFileTransferBackgroundTaskStart,
-      );
-    }
+    await _startOrUpdateForegroundService(
+      title: 'OpenFileTransfer ${direction.label} 중',
+      text: text,
+    );
     _setSnapshot(
       BackgroundTransferSnapshot(
         active: true,
@@ -115,6 +106,62 @@ class BackgroundTransferService extends ChangeNotifier {
         message: text,
       ),
     );
+  }
+
+  Future<void> startReceiveServer({
+    required String endpoint,
+    required int secondsLeft,
+  }) async {
+    await configure();
+    await requestNotificationPermission();
+    _receiveServerActive = true;
+    _receiveServerEndpoint = endpoint;
+    _receiveServerSecondsLeft = secondsLeft;
+    final text = _receiveServerText();
+    await _startOrUpdateForegroundService(
+      title: 'OpenFileTransfer 모바일 수신 대기',
+      text: text,
+    );
+    _setSnapshot(
+      BackgroundTransferSnapshot(
+        active: true,
+        direction: TransferDirection.receiving,
+        fileName: '모바일 수신 모드',
+        progress: 0,
+        message: text,
+      ),
+    );
+  }
+
+  Future<void> updateReceiveServer({
+    required String endpoint,
+    required int secondsLeft,
+  }) async {
+    if (!_receiveServerActive) {
+      return;
+    }
+    _receiveServerEndpoint = endpoint;
+    _receiveServerSecondsLeft = secondsLeft;
+    final text = _receiveServerText();
+    if (await FlutterForegroundTask.isRunningService) {
+      await FlutterForegroundTask.updateService(
+        notificationTitle: 'OpenFileTransfer 모바일 수신 대기',
+        notificationText: text,
+        notificationInitialRoute: '/',
+      );
+    }
+    final current = _snapshot;
+    if (current.fileName == '모바일 수신 모드') {
+      _setSnapshot(
+        BackgroundTransferSnapshot(
+          active: true,
+          direction: TransferDirection.receiving,
+          fileName: '모바일 수신 모드',
+          progress: 0,
+          message: text,
+        ),
+      );
+    }
   }
 
   Future<void> updateProgress(double progress) async {
@@ -155,25 +202,52 @@ class BackgroundTransferService extends ChangeNotifier {
         notificationInitialRoute: '/',
       );
       unawaited(Future<void>.delayed(const Duration(seconds: 2), () async {
-        await FlutterForegroundTask.stopService();
+        if (_receiveServerActive) {
+          await _restoreReceiveServerNotification();
+        } else {
+          await FlutterForegroundTask.stopService();
+        }
       }));
     }
-    _setSnapshot(
-      BackgroundTransferSnapshot(
-        active: false,
-        direction: current.direction,
-        fileName: current.fileName,
-        progress: 1,
-        message: text,
-      ),
-    );
+    if (_receiveServerActive) {
+      _setSnapshot(
+        BackgroundTransferSnapshot(
+          active: true,
+          direction: current.direction,
+          fileName: current.fileName,
+          progress: 1,
+          message: text,
+        ),
+      );
+    } else {
+      _setSnapshot(
+        BackgroundTransferSnapshot(
+          active: false,
+          direction: current.direction,
+          fileName: current.fileName,
+          progress: 1,
+          message: text,
+        ),
+      );
+    }
   }
 
-  Future<void> stop() async {
+  Future<void> stop({bool force = false}) async {
+    if (_receiveServerActive && !force) {
+      await _restoreReceiveServerNotification();
+      return;
+    }
+    _receiveServerActive = false;
+    _receiveServerEndpoint = '';
+    _receiveServerSecondsLeft = 0;
     if (await FlutterForegroundTask.isRunningService) {
       await FlutterForegroundTask.stopService();
     }
     _setSnapshot(const BackgroundTransferSnapshot.idle());
+  }
+
+  Future<void> stopReceiveServer() async {
+    await stop(force: true);
   }
 
   void _setSnapshot(BackgroundTransferSnapshot snapshot) {
@@ -184,6 +258,55 @@ class BackgroundTransferService extends ChangeNotifier {
   String _notificationText(TransferDirection direction, String fileName, double progress) {
     final percent = (progress.clamp(0, 1) * 100).round();
     return '$fileName ${direction.label} 중 · $percent%';
+  }
+
+  Future<void> _startOrUpdateForegroundService({
+    required String title,
+    required String text,
+  }) async {
+    if (await FlutterForegroundTask.isRunningService) {
+      await FlutterForegroundTask.updateService(
+        notificationTitle: title,
+        notificationText: text,
+        notificationInitialRoute: '/',
+      );
+    } else {
+      await FlutterForegroundTask.startService(
+        serviceId: 8742,
+        serviceTypes: Platform.isAndroid ? [ForegroundServiceTypes.dataSync] : null,
+        notificationTitle: title,
+        notificationText: text,
+        notificationInitialRoute: '/',
+        callback: openFileTransferBackgroundTaskStart,
+      );
+    }
+  }
+
+  Future<void> _restoreReceiveServerNotification() async {
+    if (!_receiveServerActive) {
+      return;
+    }
+    final text = _receiveServerText();
+    await _startOrUpdateForegroundService(
+      title: 'OpenFileTransfer 모바일 수신 대기',
+      text: text,
+    );
+    _setSnapshot(
+      BackgroundTransferSnapshot(
+        active: true,
+        direction: TransferDirection.receiving,
+        fileName: '모바일 수신 모드',
+        progress: 0,
+        message: text,
+      ),
+    );
+  }
+
+  String _receiveServerText() {
+    final secondsLeft = _receiveServerSecondsLeft.clamp(0, 24 * 60 * 60);
+    final minutes = (secondsLeft ~/ 60).toString().padLeft(2, '0');
+    final seconds = (secondsLeft % 60).toString().padLeft(2, '0');
+    return '수신 대기 중 · $_receiveServerEndpoint · $minutes:$seconds';
   }
 }
 
