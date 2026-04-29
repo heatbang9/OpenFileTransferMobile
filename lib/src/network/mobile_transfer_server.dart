@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:convert/convert.dart';
@@ -45,6 +46,61 @@ class MobileReceivedFile {
   final String sha256Hex;
 }
 
+class MobileTransferRequest {
+  const MobileTransferRequest({
+    required this.direction,
+    required this.transferId,
+    required this.peerDeviceId,
+    required this.peerName,
+    required this.fileName,
+    required this.totalBytes,
+  });
+
+  final MobileTransferDirection direction;
+  final String transferId;
+  final String peerDeviceId;
+  final String peerName;
+  final String fileName;
+  final int totalBytes;
+}
+
+class MobileTransferProgress {
+  const MobileTransferProgress({
+    required this.direction,
+    required this.transferId,
+    required this.peerDeviceId,
+    required this.peerName,
+    required this.fileName,
+    required this.transferredBytes,
+    required this.totalBytes,
+  });
+
+  final MobileTransferDirection direction;
+  final String transferId;
+  final String peerDeviceId;
+  final String peerName;
+  final String fileName;
+  final int transferredBytes;
+  final int totalBytes;
+
+  double get progress {
+    if (totalBytes <= 0) {
+      return 0;
+    }
+    return (transferredBytes / totalBytes).clamp(0, 1).toDouble();
+  }
+}
+
+enum MobileTransferDirection {
+  incoming,
+  outgoing;
+
+  String get label => switch (this) {
+        MobileTransferDirection.incoming => '수신',
+        MobileTransferDirection.outgoing => '송신',
+      };
+}
+
 class ActiveMobileTransferServer {
   ActiveMobileTransferServer({
     required this.deviceId,
@@ -52,6 +108,11 @@ class ActiveMobileTransferServer {
     required this.receiveDirectory,
     required this.ttl,
     this.onFileReceived,
+    this.onPeerSeen,
+    this.isTrustedDevice,
+    this.onTransferApprovalRequest,
+    this.onTransferProgress,
+    this.onTransferCompleted,
   });
 
   final String deviceId;
@@ -59,6 +120,11 @@ class ActiveMobileTransferServer {
   final String receiveDirectory;
   final Duration ttl;
   final void Function(MobileReceivedFile file)? onFileReceived;
+  final FutureOr<void> Function(String deviceId, String deviceName)? onPeerSeen;
+  final FutureOr<bool> Function(String deviceId)? isTrustedDevice;
+  final FutureOr<bool> Function(MobileTransferRequest request)? onTransferApprovalRequest;
+  final void Function(MobileTransferProgress progress)? onTransferProgress;
+  final FutureOr<void> Function(String deviceId, String deviceName)? onTransferCompleted;
 
   late final Server _grpcServer;
   HttpServer? _descriptorServer;
@@ -90,6 +156,11 @@ class ActiveMobileTransferServer {
           deviceName: deviceName,
           receiveDirectory: receiveDirectory,
           onFileReceived: onFileReceived,
+          onPeerSeen: onPeerSeen,
+          isTrustedDevice: isTrustedDevice,
+          onTransferApprovalRequest: onTransferApprovalRequest,
+          onTransferProgress: onTransferProgress,
+          onTransferCompleted: onTransferCompleted,
         ),
       ],
     );
@@ -213,6 +284,11 @@ class _MobileTransferService extends Service {
     required this.deviceName,
     required this.receiveDirectory,
     required this.onFileReceived,
+    required this.onPeerSeen,
+    required this.isTrustedDevice,
+    required this.onTransferApprovalRequest,
+    required this.onTransferProgress,
+    required this.onTransferCompleted,
   }) {
     $addMethod(ServiceMethod<HandshakeRequest, HandshakeResponse>(
       'Handshake',
@@ -238,6 +314,14 @@ class _MobileTransferService extends Service {
       ListFilesRequest.fromBuffer,
       (response) => response.writeToBuffer(),
     ));
+    $addMethod(ServiceMethod<FileRequest, FileChunk>(
+      'ReceiveFile',
+      receiveFile,
+      true,
+      true,
+      FileRequest.fromBuffer,
+      (response) => response.writeToBuffer(),
+    ));
     $addMethod(ServiceMethod<EventSubscription, ServerEvent>(
       'SubscribeEvents',
       subscribeEvents,
@@ -252,8 +336,13 @@ class _MobileTransferService extends Service {
   final String deviceName;
   final String receiveDirectory;
   final void Function(MobileReceivedFile file)? onFileReceived;
+  final FutureOr<void> Function(String deviceId, String deviceName)? onPeerSeen;
+  final FutureOr<bool> Function(String deviceId)? isTrustedDevice;
+  final FutureOr<bool> Function(MobileTransferRequest request)? onTransferApprovalRequest;
+  final void Function(MobileTransferProgress progress)? onTransferProgress;
+  final FutureOr<void> Function(String deviceId, String deviceName)? onTransferCompleted;
   final Map<String, _MobileSession> _sessions = <String, _MobileSession>{};
-  final List<FileEntry> _files = <FileEntry>[];
+  final List<_StoredMobileFile> _files = <_StoredMobileFile>[];
 
   @override
   String get $name => 'openfiletransfer.v1.TransferService';
@@ -285,6 +374,7 @@ class _MobileTransferService extends Service {
       clientName: request.clientName,
       expiresAt: expiresAt,
     );
+    await onPeerSeen?.call(request.clientDeviceId, request.clientName);
     return HandshakeResponse(
       sessionId: sessionId,
       serverDeviceId: deviceId,
@@ -301,6 +391,8 @@ class _MobileTransferService extends Service {
     IOSink? sink;
     String? outputPath;
     var size = 0;
+    var totalSize = 0;
+    var approvalChecked = false;
     _MobileSession? session;
     final digestSink = AccumulatorSink<crypto.Digest>();
     final hashInput = crypto.sha256.startChunkedConversion(digestSink);
@@ -310,6 +402,29 @@ class _MobileTransferService extends Service {
         session ??= _requireSession(chunk.sessionId);
         transferId ??= chunk.transferId.isEmpty ? const Uuid().v4() : chunk.transferId;
         fileName ??= p.basename(chunk.fileName.isEmpty ? 'mobile-transfer.bin' : chunk.fileName);
+        if (chunk.totalSize > 0) {
+          totalSize = chunk.totalSize;
+        }
+        if (!approvalChecked) {
+          approvalChecked = true;
+          final trusted = await _isTrusted(session.clientDeviceId);
+          if (!trusted) {
+            final approved = await onTransferApprovalRequest?.call(
+                  MobileTransferRequest(
+                    direction: MobileTransferDirection.incoming,
+                    transferId: transferId,
+                    peerDeviceId: session.clientDeviceId,
+                    peerName: session.clientName,
+                    fileName: fileName,
+                    totalBytes: totalSize,
+                  ),
+                ) ??
+                false;
+            if (!approved) {
+              throw GrpcError.permissionDenied('사용자가 파일 수신을 거부했습니다.');
+            }
+          }
+        }
         outputPath ??= await _availableOutputPath(receiveDirectory, fileName);
         sink ??= File(outputPath).openWrite();
         final plain = chunk.encrypted
@@ -321,6 +436,17 @@ class _MobileTransferService extends Service {
         sink.add(plain);
         hashInput.add(plain);
         size += plain.length;
+        onTransferProgress?.call(
+          MobileTransferProgress(
+            direction: MobileTransferDirection.incoming,
+            transferId: transferId,
+            peerDeviceId: session.clientDeviceId,
+            peerName: session.clientName,
+            fileName: fileName,
+            transferredBytes: size,
+            totalBytes: totalSize,
+          ),
+        );
       }
     } finally {
       await sink?.close();
@@ -339,7 +465,7 @@ class _MobileTransferService extends Service {
       sha256Hex: sha256Hex,
       receivedAtUnixTimeMs: DateTime.now().millisecondsSinceEpoch,
     );
-    _files.insert(0, entry);
+    _files.insert(0, _StoredMobileFile(entry: entry, outputPath: outputPath));
     onFileReceived?.call(
       MobileReceivedFile(
         fileName: fileName,
@@ -348,6 +474,9 @@ class _MobileTransferService extends Service {
         sha256Hex: sha256Hex,
       ),
     );
+    if (session != null) {
+      await onTransferCompleted?.call(session.clientDeviceId, session.clientName);
+    }
     return TransferReceipt(
       transferId: transferId,
       fileId: fileId,
@@ -358,9 +487,85 @@ class _MobileTransferService extends Service {
     );
   }
 
+  Future<bool> _isTrusted(String deviceId) async {
+    return Future<bool>.value(isTrustedDevice?.call(deviceId) ?? false);
+  }
+
   Future<ListFilesResponse> listFiles(ServiceCall call, ListFilesRequest request) async {
     _requireSession(request.sessionId);
-    return ListFilesResponse(files: List<FileEntry>.unmodifiable(_files));
+    return ListFilesResponse(
+      files: List<FileEntry>.unmodifiable(_files.map((file) => file.entry)),
+    );
+  }
+
+  Stream<FileChunk> receiveFile(ServiceCall call, Stream<FileRequest> request) async* {
+    FileRequest? firstRequest;
+    await for (final item in request) {
+      firstRequest = item;
+      break;
+    }
+    if (firstRequest == null) {
+      throw GrpcError.invalidArgument('파일 요청을 받지 못했습니다.');
+    }
+
+    final session = _requireSession(firstRequest.sessionId);
+    final storedFile = _findStoredFile(firstRequest.fileId);
+    final trusted = await _isTrusted(session.clientDeviceId);
+    if (!trusted) {
+      final approved = await onTransferApprovalRequest?.call(
+            MobileTransferRequest(
+              direction: MobileTransferDirection.outgoing,
+              transferId: const Uuid().v4(),
+              peerDeviceId: session.clientDeviceId,
+              peerName: session.clientName,
+              fileName: storedFile.entry.fileName,
+              totalBytes: storedFile.entry.size,
+            ),
+          ) ??
+          false;
+      if (!approved) {
+        throw GrpcError.permissionDenied('사용자가 파일 송신을 거부했습니다.');
+      }
+    }
+
+    final file = File(storedFile.outputPath);
+    if (!await file.exists()) {
+      throw GrpcError.notFound('저장된 파일을 찾을 수 없습니다.');
+    }
+
+    final transferId = const Uuid().v4();
+    var offset = 0;
+    await for (final plain in file.openRead()) {
+      final encrypted = await AesGcm.with256bits().encrypt(
+        plain,
+        secretKey: session.sessionKey,
+        nonce: _randomNonce(),
+      );
+      offset += plain.length;
+      onTransferProgress?.call(
+        MobileTransferProgress(
+          direction: MobileTransferDirection.outgoing,
+          transferId: transferId,
+          peerDeviceId: session.clientDeviceId,
+          peerName: session.clientName,
+          fileName: storedFile.entry.fileName,
+          transferredBytes: offset,
+          totalBytes: storedFile.entry.size,
+        ),
+      );
+      yield FileChunk(
+        sessionId: firstRequest.sessionId,
+        transferId: transferId,
+        fileName: storedFile.entry.fileName,
+        totalSize: storedFile.entry.size,
+        offset: offset - plain.length,
+        nonce: encrypted.nonce,
+        data: encrypted.cipherText,
+        authTag: encrypted.mac.bytes,
+        encrypted: true,
+        sha256Hex: offset >= storedFile.entry.size ? storedFile.entry.sha256Hex : '',
+      );
+    }
   }
 
   Stream<ServerEvent> subscribeEvents(ServiceCall call, EventSubscription request) async* {
@@ -398,6 +603,15 @@ class _MobileTransferService extends Service {
     return candidate;
   }
 
+  _StoredMobileFile _findStoredFile(String fileId) {
+    for (final file in _files) {
+      if (file.entry.fileId == fileId) {
+        return file;
+      }
+    }
+    throw GrpcError.notFound('파일을 찾을 수 없습니다.');
+  }
+
   List<int> _toX25519Spki(List<int> rawPublicKey) {
     if (rawPublicKey.length != 32) {
       throw ArgumentError('X25519 public key는 32 bytes여야 합니다.');
@@ -419,4 +633,19 @@ class _MobileTransferService extends Service {
     }
     return spkiPublicKey.sublist(_x25519SpkiPrefix.length);
   }
+
+  List<int> _randomNonce() {
+    final random = Random.secure();
+    return List<int>.generate(12, (_) => random.nextInt(256));
+  }
+}
+
+class _StoredMobileFile {
+  const _StoredMobileFile({
+    required this.entry,
+    required this.outputPath,
+  });
+
+  final FileEntry entry;
+  final String outputPath;
 }

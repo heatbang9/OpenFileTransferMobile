@@ -554,6 +554,33 @@ class FileRequest {
           ..writeString(2, fileId))
         .takeBytes();
   }
+
+  static FileRequest fromBuffer(List<int> bytes) {
+    final reader = ProtoReader(bytes);
+    var sessionId = '';
+    var fileId = '';
+
+    while (!reader.isAtEnd) {
+      final tag = reader.readTag();
+      final field = tag >> 3;
+      final wireType = tag & 7;
+      switch (field) {
+        case 1:
+          sessionId = reader.readString();
+          break;
+        case 2:
+          fileId = reader.readString();
+          break;
+        default:
+          reader.skipField(wireType);
+      }
+    }
+
+    return FileRequest(
+      sessionId: sessionId,
+      fileId: fileId,
+    );
+  }
 }
 
 class TransferReceipt {

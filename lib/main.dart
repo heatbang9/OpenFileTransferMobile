@@ -8,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 
 import 'src/brand/open_file_transfer_brand.dart';
 import 'src/device/device_profile_store.dart';
+import 'src/device/trusted_device_store.dart';
 import 'src/discovery/ssdp_discovery_client.dart';
 import 'src/network/mobile_transfer_client.dart';
 import 'src/network/mobile_transfer_server.dart';
@@ -15,6 +16,7 @@ import 'src/transfer/background_transfer_service.dart';
 
 final BackgroundTransferService _backgroundTransferService = BackgroundTransferService();
 final DeviceProfileStore _deviceProfileStore = DeviceProfileStore();
+final TrustedDeviceStore _trustedDeviceStore = TrustedDeviceStore();
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -85,6 +87,9 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
   ReceivedFileResult? _lastReceivedFile;
   ActiveMobileTransferServer? _mobileServer;
   MobileReceivedFile? _lastPeerReceivedFile;
+  List<TrustedDevice> _trustedDevices = const <TrustedDevice>[];
+  MobileTransferProgress? _peerReceiveProgress;
+  String? _peerReceiveNotificationTransferId;
   Timer? _mobileServerTicker;
   DateTime? _mobileServerExpiresAt;
   int _mobileServerSecondsLeft = 0;
@@ -104,6 +109,7 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
   void initState() {
     super.initState();
     _loadDeviceProfile();
+    unawaited(_loadTrustedDevices());
   }
 
   Future<void> _loadDeviceProfile() async {
@@ -131,6 +137,56 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
       _deviceProfile = profile;
       _status = '${profile.deviceName} 이름으로 저장되었습니다.';
     });
+  }
+
+  Future<void> _loadTrustedDevices() async {
+    final devices = await _trustedDeviceStore.load();
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _trustedDevices = devices;
+    });
+  }
+
+  Future<void> _rememberPeer(
+    String deviceId,
+    String deviceName, {
+    bool? trusted,
+    bool transferCompleted = false,
+  }) async {
+    if (deviceId.trim().isEmpty) {
+      return;
+    }
+    await _trustedDeviceStore.remember(
+      deviceId: deviceId,
+      deviceName: deviceName,
+      trusted: trusted,
+      transferCompleted: transferCompleted,
+    );
+    await _loadTrustedDevices();
+  }
+
+  Future<void> _setPeerTrusted(String deviceId, bool trusted) async {
+    final devices = await _trustedDeviceStore.setTrusted(deviceId, trusted);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _trustedDevices = devices;
+      _status = trusted
+          ? '디바이스를 항상 허용했습니다.'
+          : '디바이스 자동 허용을 해제했습니다.';
+    });
+  }
+
+  Future<bool> _isTrustedPeer(String deviceId) async {
+    if (_trustedDevices.any(
+      (device) => device.deviceId == deviceId && device.trusted,
+    )) {
+      return true;
+    }
+    return _trustedDeviceStore.isTrusted(deviceId);
   }
 
   Future<void> _discoverServers() async {
@@ -485,6 +541,75 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
     }
   }
 
+  Future<bool> _confirmPeerTransfer(MobileTransferRequest request) async {
+    await _rememberPeer(request.peerDeviceId, request.peerName);
+    if (!mounted) {
+      return false;
+    }
+    final sizeLabel = request.totalBytes > 0
+        ? '${request.totalBytes} bytes'
+        : '크기 확인 중';
+    final directionText = request.direction == MobileTransferDirection.incoming
+        ? '보내려고 합니다'
+        : '가져가려고 합니다';
+    final result = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('모바일 파일 접근 승인'),
+          content: Text(
+            '${request.peerName}에서 ${request.fileName} 파일을 $directionText.\n'
+            '디바이스 UUID: ${request.peerDeviceId}\n'
+            '크기: $sizeLabel',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop('deny'),
+              child: const Text('거부'),
+            ),
+            OutlinedButton(
+              onPressed: () => Navigator.of(context).pop('once'),
+              child: const Text('이번만 허용'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop('always'),
+              child: const Text('항상 허용'),
+            ),
+          ],
+        );
+      },
+    );
+    if (result == 'always') {
+      await _rememberPeer(request.peerDeviceId, request.peerName, trusted: true);
+      return true;
+    }
+    return result == 'once';
+  }
+
+  void _handlePeerReceiveProgress(MobileTransferProgress progress) {
+    if (_peerReceiveNotificationTransferId != progress.transferId) {
+      _peerReceiveNotificationTransferId = progress.transferId;
+      unawaited(
+        _backgroundTransferService.startTransfer(
+          direction: progress.direction == MobileTransferDirection.incoming
+              ? TransferDirection.receiving
+              : TransferDirection.sending,
+          fileName: progress.fileName,
+        ),
+      );
+    }
+    unawaited(_backgroundTransferService.updateProgress(progress.progress));
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _peerReceiveProgress = progress;
+      final percent = (progress.progress * 100).round();
+      _status = '${progress.peerName}와 모바일 ${progress.direction.label} 중 · $percent%';
+    });
+  }
+
   Future<void> _startTemporaryMobileServer() async {
     if (_mobileServer != null) {
       _markPending('모바일 수신 모드가 이미 실행 중입니다.');
@@ -498,12 +623,24 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
       deviceName: profile.deviceName,
       receiveDirectory: receiveDir.path,
       ttl: const Duration(minutes: 10),
+      onPeerSeen: (deviceId, deviceName) async {
+        await _rememberPeer(deviceId, deviceName);
+      },
+      isTrustedDevice: _isTrustedPeer,
+      onTransferApprovalRequest: _confirmPeerTransfer,
+      onTransferProgress: _handlePeerReceiveProgress,
+      onTransferCompleted: (deviceId, deviceName) async {
+        await _rememberPeer(deviceId, deviceName, transferCompleted: true);
+      },
       onFileReceived: (file) {
+        unawaited(_backgroundTransferService.completeTransfer());
+        _peerReceiveNotificationTransferId = null;
         if (!mounted) {
           return;
         }
         setState(() {
           _lastPeerReceivedFile = file;
+          _peerReceiveProgress = null;
           _status = '${file.fileName} 모바일 수신 완료';
         });
       },
@@ -553,6 +690,8 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
     _mobileServer = null;
     _mobileServerExpiresAt = null;
     _mobileServerSecondsLeft = 0;
+    _peerReceiveProgress = null;
+    _peerReceiveNotificationTransferId = null;
     await server?.stop();
     if (mounted && updateStatus) {
       setState(() {
@@ -638,6 +777,11 @@ class _DeviceDiscoveryPageState extends State<DeviceDiscoveryPage> {
                   : '${_mobileServer!.hostAddress}:${_mobileServer!.grpcPort}',
               secondsLeft: _mobileServerSecondsLeft,
               lastReceivedFile: _lastPeerReceivedFile,
+              progress: _peerReceiveProgress,
+              trustedDevices: _trustedDevices,
+              onTrustChanged: (device) {
+                unawaited(_setPeerTrusted(device.deviceId, !device.trusted));
+              },
               onStart: _startTemporaryMobileServer,
               onStop: () {
                 unawaited(_stopTemporaryMobileServer());
@@ -1197,6 +1341,9 @@ class _PeerReceivePanel extends StatelessWidget {
     required this.endpoint,
     required this.secondsLeft,
     required this.lastReceivedFile,
+    required this.progress,
+    required this.trustedDevices,
+    required this.onTrustChanged,
     required this.onStart,
     required this.onStop,
   });
@@ -1205,6 +1352,9 @@ class _PeerReceivePanel extends StatelessWidget {
   final String? endpoint;
   final int secondsLeft;
   final MobileReceivedFile? lastReceivedFile;
+  final MobileTransferProgress? progress;
+  final List<TrustedDevice> trustedDevices;
+  final ValueChanged<TrustedDevice> onTrustChanged;
   final VoidCallback onStart;
   final VoidCallback onStop;
 
@@ -1244,11 +1394,102 @@ class _PeerReceivePanel extends StatelessWidget {
               value: '${lastReceivedFile!.fileName} · ${lastReceivedFile!.size} bytes',
             ),
           ],
+          if (progress != null) ...[
+            const SizedBox(height: 12),
+            Text(
+              '${progress!.peerName} · ${progress!.fileName} · ${(progress!.progress * 100).round()}%',
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: OpenFileTransferColors.ink,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 8),
+            LinearProgressIndicator(
+              value: progress!.progress,
+              minHeight: 8,
+              color: OpenFileTransferColors.teal700,
+              backgroundColor: OpenFileTransferColors.mint100,
+              borderRadius: BorderRadius.circular(8),
+            ),
+          ],
           const SizedBox(height: 10),
           const Text(
-            '다른 모바일에서 서버 찾기를 누르면 이 기기가 임시 OpenFileTransfer 서버로 표시됩니다.',
+            '미승인 모바일은 파일을 주고받기 전에 확인 창을 띄우고, '
+            '항상 허용한 디바이스는 바로 통과합니다.',
             style: TextStyle(color: OpenFileTransferColors.teal900),
           ),
+          const SizedBox(height: 12),
+          if (trustedDevices.isEmpty)
+            const Text('아직 발견되거나 승인된 모바일 디바이스가 없습니다.')
+          else
+            Column(
+              children: trustedDevices.map((device) {
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: device.trusted ? OpenFileTransferColors.mint50 : Colors.white,
+                      border: Border.all(color: OpenFileTransferColors.mint300),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Row(
+                        children: [
+                          Icon(
+                            device.trusted
+                                ? Icons.verified_user_rounded
+                                : Icons.person_search_rounded,
+                            color: OpenFileTransferColors.teal700,
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  device.deviceName,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    color: OpenFileTransferColors.ink,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                                const SizedBox(height: 2),
+                                Builder(
+                                  builder: (_) {
+                                    final trustLabel = device.trusted ? '항상 허용' : '확인 필요';
+                                    return Text(
+                                      '$trustLabel · ${device.transferCount}회 수신 · ${device.deviceId}',
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        color: OpenFileTransferColors.teal900,
+                                        fontSize: 12,
+                                      ),
+                                    );
+                                  },
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          OutlinedButton.icon(
+                            onPressed: () => onTrustChanged(device),
+                            icon: Icon(
+                              device.trusted
+                                  ? Icons.lock_open_rounded
+                                  : Icons.done_rounded,
+                            ),
+                            label: Text(device.trusted ? '해제' : '허용'),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                );
+              }).toList(growable: false),
+            ),
         ],
       ),
     );
